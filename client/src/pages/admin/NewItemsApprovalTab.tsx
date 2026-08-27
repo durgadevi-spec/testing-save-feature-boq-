@@ -1,0 +1,359 @@
+import React, { useEffect, useState } from "react";
+import { Card, CardContent } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { Input } from "@/components/ui/input";
+import { Checkbox } from "@/components/ui/checkbox";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import { Loader2, CheckCircle2, XCircle, ChevronDown, ChevronUp, Package, ArrowRight } from "lucide-react";
+import apiFetch from "@/lib/api";
+import { useToast } from "@/hooks/use-toast";
+import { computeBoq } from "@/lib/boqCalc";
+
+// Renders Save / Save As requests submitted from Generate BOM Product
+// Cards. Fully additive: talks only to the new
+// /api/boq-manual-item-requests endpoints and never touches the existing
+// /api/product-approvals data shown in the other tabs.
+
+type ManualItemRequest = {
+  id: string;
+  type: "save" | "save_as";
+  boq_item_id: string;
+  project_id: string | null;
+  version_id: string | null;
+  source_product_name: string;
+  new_product_name: string | null;
+  item_indexes: number[] | string;
+  items: any[] | string;
+  calculated_results: any;
+  status: "pending" | "approved" | "rejected";
+  rejection_reason: string | null;
+  requested_by_name: string;
+  approved_by_name: string | null;
+  created_at: string;
+  decided_at: string | null;
+};
+
+const asArray = (v: any) => {
+  if (Array.isArray(v)) return v;
+  if (typeof v === "string") { try { return JSON.parse(v); } catch { return []; } }
+  return [];
+};
+
+const asObj = (v: any) => {
+  if (v && typeof v === "object" && !Array.isArray(v)) return v;
+  if (typeof v === "string") { try { return JSON.parse(v); } catch { return {}; } }
+  return {};
+};
+
+const formatDate = (dateStr: string | null) => {
+  if (!dateStr) return "-";
+  const d = new Date(dateStr);
+  if (isNaN(d.getTime())) return "-";
+  return d.toLocaleDateString(undefined, { day: "2-digit", month: "2-digit", year: "numeric" }) + " " + d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+};
+
+export default function NewItemsApprovalTab({ canAct }: { canAct: boolean }) {
+  const [requests, setRequests] = useState<ManualItemRequest[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [actionLoading, setActionLoading] = useState<string | null>(null);
+  const [statusFilter, setStatusFilter] = useState<"pending" | "approved" | "rejected" | "all">("pending");
+  const { toast } = useToast();
+
+  const fetchRequests = async () => {
+    try {
+      setLoading(true);
+      const res = await apiFetch(`/api/boq-manual-item-requests?status=${statusFilter}`);
+      if (res.ok) {
+        const data = await res.json();
+        setRequests(data.requests || []);
+      }
+    } catch (err) {
+      console.error("Failed to load manual item requests:", err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => { fetchRequests(); }, [statusFilter]);
+
+  const handleApprove = async (id: string) => {
+    setActionLoading(id);
+    try {
+      const res = await apiFetch(`/api/boq-manual-item-requests/${id}/approve`, { method: "POST" });
+      if (!res.ok) throw new Error(await res.text());
+      toast({ title: "Approved" });
+      fetchRequests();
+    } catch (err) {
+      console.error(err);
+      toast({ title: "Error", description: "Failed to approve request", variant: "destructive" });
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  const handleReject = async (id: string) => {
+    const reason = window.prompt("Reason for rejection (optional):") || undefined;
+    setActionLoading(id);
+    try {
+      const res = await apiFetch(`/api/boq-manual-item-requests/${id}/reject`, {
+        method: "POST",
+        body: JSON.stringify({ reason }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      toast({ title: "Rejected" });
+      fetchRequests();
+    } catch (err) {
+      console.error(err);
+      toast({ title: "Error", description: "Failed to reject request", variant: "destructive" });
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  const statusBadge = (status: string) => {
+    if (status === "pending") return <Badge className="bg-amber-100 text-amber-700 hover:bg-amber-100 font-bold">Pending</Badge>;
+    if (status === "approved") return <Badge className="bg-green-100 text-green-700 hover:bg-green-100 font-bold">Approved</Badge>;
+    return <Badge className="bg-red-100 text-red-700 hover:bg-red-100 font-bold">Rejected</Badge>;
+  };
+
+  if (loading) {
+    return <div className="flex items-center justify-center py-16"><Loader2 className="h-6 w-6 animate-spin text-slate-400" /></div>;
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center gap-2">
+        {(["pending", "approved", "rejected", "all"] as const).map((s) => (
+          <Button
+            key={s}
+            size="sm"
+            variant={statusFilter === s ? "default" : "outline"}
+            className="h-8 text-xs font-bold capitalize"
+            onClick={() => setStatusFilter(s)}
+          >
+            {s}
+          </Button>
+        ))}
+      </div>
+
+      {requests.length === 0 && (
+        <Card><CardContent className="py-10 text-center text-sm text-slate-400">No {statusFilter !== "all" ? statusFilter : ""} requests</CardContent></Card>
+      )}
+
+      {requests.map((r) => {
+        const items = asArray(r.items);
+        const calcResults = asObj(r.calculated_results);
+        const productConfig = asObj(calcResults.productConfig);
+        const isExpanded = expandedId === r.id;
+
+        // Build basis for computeBoq from submitted product config
+        const basis = {
+          requiredUnitType: (productConfig.requiredUnitType || "Sqft") as any,
+          baseRequiredQty: Number(productConfig.baseRequiredQty || 1),
+          wastagePctDefault: 0,
+        };
+
+        // Build materialLines from submitted items
+        const materialLines = items.map((it: any) => ({
+          id: it.material_id || it.title || `item-${it.index}`,
+          name: it.title || it.description || "Untitled",
+          unit: it.unit || "-",
+          location: it.location || "Main Area",
+          baseQty: Number(it.qtyPerSqf ?? it.qty ?? 0),
+          wastagePct: it.wastagePct !== undefined ? Number(it.wastagePct) : undefined,
+          supplyRate: Number(it.supply_rate ?? 0),
+          installRate: Number(it.install_rate ?? 0),
+          applyWastage: it.wastagePct !== undefined && Number(it.wastagePct) > 0,
+          freeze_and_edit: it.freezeAndEdit || false,
+          shop_name: it.shop_name || "",
+        }));
+
+        let boqRes: any = null;
+        try {
+          boqRes = computeBoq(basis, materialLines, basis.baseRequiredQty);
+        } catch { /* ignore computation errors */ }
+
+        return (
+          <Card key={r.id} className="overflow-hidden">
+            <CardContent className="p-0">
+              {/* Header Row */}
+              <div className="flex items-center justify-between px-4 py-3 cursor-pointer hover:bg-slate-50" onClick={() => setExpandedId(isExpanded ? null : r.id)}>
+                <div className="flex items-center gap-3">
+                  <Package className="h-4 w-4 text-slate-400" />
+                  <div>
+                    <div className="font-bold text-sm text-slate-800 flex items-center gap-2">
+                      {r.type === "save" ? (
+                        <>Add {items.length} item{items.length === 1 ? "" : "s"} to <span className="text-primary">{r.source_product_name}</span></>
+                      ) : (
+                        <>New Manual Product: <span className="text-primary">{r.new_product_name}</span></>
+                      )}
+                    </div>
+                    {r.type === "save_as" && (
+                      <div className="text-xs text-slate-400 flex items-center gap-1 mt-0.5">
+                        Source: {r.source_product_name} <ArrowRight className="h-3 w-3" /> {r.new_product_name}
+                      </div>
+                    )}
+                    <div className="text-[11px] text-slate-400 mt-0.5">Requested by {r.requested_by_name} · {formatDate(r.created_at)}</div>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2">
+                  {statusBadge(r.status)}
+                  {isExpanded ? <ChevronUp className="h-4 w-4 text-slate-400" /> : <ChevronDown className="h-4 w-4 text-slate-400" />}
+                </div>
+              </div>
+
+              {/* Expanded Details */}
+              {isExpanded && (
+                <div className="border-t border-slate-100 px-4 py-3 space-y-3 bg-slate-50/50">
+                  {/* Config Summary Bar — matches ProductApprovals layout */}
+                  <div className="grid grid-cols-2 md:grid-cols-6 gap-3">
+                    <div className="bg-white rounded-lg border p-3">
+                      <p className="text-[10px] uppercase font-bold text-muted-foreground">Change Type</p>
+                      <p className="font-bold text-sm">{r.type === "save" ? "New Manual Items" : "New Product (Save As)"}</p>
+                    </div>
+                    <div className="bg-white rounded-lg border p-3">
+                      <p className="text-[10px] uppercase font-bold text-muted-foreground">Source Product</p>
+                      <p className="font-bold text-sm truncate">{r.source_product_name}</p>
+                    </div>
+                    {r.new_product_name && (
+                      <div className="bg-white rounded-lg border p-3">
+                        <p className="text-[10px] uppercase font-bold text-muted-foreground">New Product Name</p>
+                        <p className="font-bold text-sm truncate">{r.new_product_name}</p>
+                      </div>
+                    )}
+                    <div className="bg-white rounded-lg border p-3">
+                      <p className="text-[10px] uppercase font-bold text-muted-foreground">Unit Type</p>
+                      <p className="font-bold text-sm">{productConfig.requiredUnitType || "Sqft"}</p>
+                    </div>
+                    <div className="bg-white rounded-lg border p-3">
+                      <p className="text-[10px] uppercase font-bold text-muted-foreground">Base Qty</p>
+                      <p className="font-bold text-sm">{productConfig.baseRequiredQty || 1}</p>
+                    </div>
+                    {(productConfig.dimA || productConfig.dimB || productConfig.dimC) && (
+                      <div className="bg-white rounded-lg border p-3">
+                        <p className="text-[10px] uppercase font-bold text-muted-foreground">Dimensions</p>
+                        <p className="font-bold text-sm">
+                          {[productConfig.dimA, productConfig.dimB, productConfig.dimC].filter(Boolean).join(" × ")}
+                        </p>
+                      </div>
+                    )}
+                    {calcResults?.grandTotal !== undefined && (
+                      <div className="bg-white rounded-lg border p-3">
+                        <p className="text-[10px] uppercase font-bold text-muted-foreground">Calculated Total</p>
+                        <p className="font-bold text-sm text-primary">₹{Number(calcResults.grandTotal).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Items Table — matches ProductApprovals detail table */}
+                  <div className="rounded-lg border overflow-hidden bg-white">
+                    <Table>
+                      <TableHeader className="bg-muted/30">
+                        <TableRow>
+                          <TableHead className="w-[40px] font-bold">Sl</TableHead>
+                          <TableHead className="font-bold py-4">Item</TableHead>
+                          <TableHead className="w-[60px] font-bold">Unit</TableHead>
+                          <TableHead className="w-[100px] font-bold">Qty</TableHead>
+                          <TableHead className="w-[100px] font-bold">Supply Rate</TableHead>
+                          <TableHead className="w-[100px] font-bold">Install Rate</TableHead>
+                          <TableHead className="w-[110px] font-bold">Base Amount</TableHead>
+                          <TableHead className="w-[80px] font-bold">Wastage %</TableHead>
+                          <TableHead className="w-[80px] font-bold">Wastage Qty</TableHead>
+                          <TableHead className="w-[90px] font-bold">Total Qty</TableHead>
+                          <TableHead className="w-[90px] font-bold">Final Amount</TableHead>
+                          {boqRes && <TableHead className="w-[90px] font-bold">Per {basis.requiredUnitType} Qty</TableHead>}
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {items.map((it: any, idx: number) => {
+                          const supplyRate = Number(it.supply_rate ?? 0);
+                          const installRate = Number(it.install_rate ?? 0);
+                          const baseQty = Number(it.qtyPerSqf ?? it.qty ?? 0);
+                          const wastagePct = Number(it.wastagePct ?? 0);
+                          const rate = supplyRate + installRate;
+                          const baseAmt = baseQty * rate;
+                          const isFrozen = it.freezeAndEdit;
+
+                          // Use computeBoq results if available
+                          const computed = boqRes?.computed?.[idx];
+                          const wastageQty = computed?.wastageQty ?? (baseQty * wastagePct / 100);
+                          const totalQty = computed?.roundOffQty ?? (baseQty + wastageQty);
+                          const finalAmt = computed?.lineTotal ?? (totalQty * rate);
+                          const perUnitQty = computed?.perUnitQty ?? 0;
+
+                          return (
+                            <TableRow
+                              key={idx}
+                              className={`hover:bg-muted/5 text-[11px] ${isFrozen ? "bg-cyan-100/60 border-l-4 border-l-cyan-500 shadow-sm" : ""}`}
+                            >
+                              <TableCell className="text-center font-medium">{idx + 1}</TableCell>
+                              <TableCell className="font-semibold">{it.title || it.description}</TableCell>
+                              <TableCell className="text-[10px] font-medium">{it.unit || "-"}</TableCell>
+                              <TableCell className="text-[11px] font-bold text-center">{baseQty}</TableCell>
+                              <TableCell className="text-[10px] font-bold">₹{supplyRate.toLocaleString()}</TableCell>
+                              <TableCell className="text-[10px] font-bold">₹{installRate.toLocaleString()}</TableCell>
+                              <TableCell className="text-[10px] font-bold">₹{baseAmt.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</TableCell>
+                              <TableCell className="text-[10px] font-bold text-orange-600">{wastagePct}%</TableCell>
+                              <TableCell className="text-[10px] font-bold text-orange-600">{wastageQty.toFixed(2)}</TableCell>
+                              <TableCell className="text-[10px] font-bold">{totalQty.toFixed(2)}</TableCell>
+                              <TableCell className="text-[10px] font-bold text-blue-600">₹{finalAmt.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</TableCell>
+                              {boqRes && <TableCell className="text-[10px] font-bold text-primary">{perUnitQty.toFixed(4)}</TableCell>}
+                            </TableRow>
+                          );
+                        })}
+                        {/* Grand Total Row */}
+                        <TableRow className="bg-muted/20 font-black">
+                          <TableCell colSpan={6} className="text-right py-3 pr-4">Total (Incl. Wastage)</TableCell>
+                          <TableCell className="text-[11px] font-bold">
+                            ₹{items.reduce((sum: number, it: any) => {
+                              const rate = Number(it.supply_rate ?? 0) + Number(it.install_rate ?? 0);
+                              return sum + Number(it.qtyPerSqf ?? it.qty ?? 0) * rate;
+                            }, 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                          </TableCell>
+                          <TableCell colSpan={3}></TableCell>
+                          <TableCell className="text-[11px] font-bold text-primary">
+                            ₹{(boqRes?.grandTotal ?? calcResults?.grandTotal ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                          </TableCell>
+                          {boqRes && <TableCell></TableCell>}
+                        </TableRow>
+                      </TableBody>
+                    </Table>
+                  </div>
+
+                  {r.status === "rejected" && r.rejection_reason && (
+                    <div className="text-xs text-red-600"><span className="font-bold">Rejection reason:</span> {r.rejection_reason}</div>
+                  )}
+                  {r.status !== "pending" && (
+                    <div className="text-[11px] text-slate-400">{r.status === "approved" ? "Approved" : "Rejected"} by {r.approved_by_name || "-"} · {formatDate(r.decided_at)}</div>
+                  )}
+
+                  {r.status === "pending" && canAct && (
+                    <div className="flex items-center gap-2 pt-1">
+                      <Button size="sm" className="h-8 bg-green-600 hover:bg-green-700 text-white font-bold" disabled={actionLoading === r.id} onClick={() => handleApprove(r.id)}>
+                        {actionLoading === r.id ? <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" /> : <CheckCircle2 className="h-3.5 w-3.5 mr-1" />}
+                        Approve
+                      </Button>
+                      <Button size="sm" variant="destructive" className="h-8 font-bold" disabled={actionLoading === r.id} onClick={() => handleReject(r.id)}>
+                        <XCircle className="h-3.5 w-3.5 mr-1" />
+                        Reject
+                      </Button>
+                    </div>
+                  )}
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        );
+      })}
+    </div>
+  );
+}
