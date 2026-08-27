@@ -1399,6 +1399,17 @@ export async function registerRoutes(
       )
     `);
     console.log("[db] step11_products and items tables ensured");
+    // Ensure columns added after initial schema
+    const addCols = [
+      "ALTER TABLE step11_product_items ADD COLUMN IF NOT EXISTS apply_wastage BOOLEAN DEFAULT TRUE",
+      "ALTER TABLE step11_product_items ADD COLUMN IF NOT EXISTS shop_name VARCHAR(255)",
+      "ALTER TABLE step11_product_items ADD COLUMN IF NOT EXISTS base_qty DECIMAL(15,2)",
+      "ALTER TABLE step11_product_items ADD COLUMN IF NOT EXISTS wastage_pct DECIMAL(15,4)",
+      "ALTER TABLE step11_product_items ADD COLUMN IF NOT EXISTS is_project_pricing BOOLEAN DEFAULT FALSE",
+    ];
+    for (const sql of addCols) {
+      try { await query(sql); } catch { /* column may already exist */ }
+    }
   } catch (err: unknown) {
     console.warn("[db] Could not ensure step11_products tables:", (err as any)?.message || err);
   }
@@ -8736,8 +8747,8 @@ export async function registerRoutes(
                   for (const item of newItemsToInsert) {
                       await query(
                         `INSERT INTO step11_product_items 
-                         (step11_product_id, material_id, material_name, unit, qty, supply_rate, install_rate, rate, amount, location, freeze_and_edit, apply_wastage, shop_name, base_qty)
-                         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
+                         (step11_product_id, material_id, material_name, unit, qty, supply_rate, install_rate, rate, amount, location, freeze_and_edit, apply_wastage, shop_name, base_qty, wastage_pct)
+                         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
                         [
                           step11ProductId,
                           item.id || item.material_id || item.materialId || "00000000-0000-0000-0000-000000000000",
@@ -8752,7 +8763,8 @@ export async function registerRoutes(
                           item.freezeAndEdit === true || item.freeze_and_edit === true,
                           item.applyWastage !== undefined ? item.applyWastage : true,
                           item.shopName || item.shop_name || null,
-                          item.baseQty ?? item.qty ?? 0
+                          item.baseQty ?? item.qty ?? 0,
+                          item.wastagePct !== undefined ? item.wastagePct : null
                         ]
                       );
                   }
@@ -8880,8 +8892,8 @@ export async function registerRoutes(
             const item = itemsToInsert[i];
             await query(
               `INSERT INTO step11_product_items 
-               (step11_product_id, material_id, material_name, unit, qty, supply_rate, install_rate, rate, amount, location, freeze_and_edit, apply_wastage, shop_name, base_qty)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
+               (step11_product_id, material_id, material_name, unit, qty, supply_rate, install_rate, rate, amount, location, freeze_and_edit, apply_wastage, shop_name, base_qty, wastage_pct)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
               [
                 step11ProductId,
                 item.id || item.material_id || item.materialId,
@@ -8896,7 +8908,8 @@ export async function registerRoutes(
                 item.freezeAndEdit === true,
                 item.applyWastage !== false,
                 item.shop_name || item.shopName || null,
-                item.baseQty ?? item.qty
+                item.baseQty ?? item.qty,
+                item.wastagePct !== undefined ? item.wastagePct : null
               ]
             );
           }
@@ -8937,13 +8950,13 @@ export async function registerRoutes(
           );
           createdBoqItemId = newItemId;
 
-          // Unlock the source items — they were used as a basis for the
-          // new product but the original product itself is unchanged.
-          const updatedStep11 = step11Items.map((it: any, idx: number) => {
-            if (!itemIndexes.includes(idx)) return it;
-            if (!it.manualApproval || it.manualApproval.requestId !== id) return it;
-            const { manualApproval, ...rest } = it;
-            return rest;
+          // Remove the source items from the original product — they have now
+          // been moved into a brand new product in the BOM.
+          const updatedStep11 = step11Items.filter((it: any, idx: number) => {
+            if (itemIndexes.includes(idx) && it.manualApproval && it.manualApproval.requestId === id) {
+              return false; // Remove this item
+            }
+            return true; // Keep this item
           });
           const updatedTableData = { ...tableData, step11_items: updatedStep11 };
           await query(`UPDATE boq_items SET table_data = $1, computed_value = $2 WHERE id = $3`, [JSON.stringify(updatedTableData), computeItemValue(updatedTableData), request.boq_item_id]);
