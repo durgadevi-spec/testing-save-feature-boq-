@@ -71,12 +71,13 @@ export const BoqItemRow = React.memo(function BoqItemRow({ item, itemIdx, boqIte
   const { toast } = useToast();
   const itemKey = item.itemKey || `${boqItem.id}-manual-${itemIdx}`;
   const [changeShopRateOpen, setChangeShopRateOpen] = useState(false);
-  // "Change Shop & Rate" is a new, isolated feature scoped to manual material
-  // lines (item.manual === true) with a real materials.id — these are exactly
-  // the individual materials a user picks via MaterialPicker, one shop/rate
-  // per line, which is the scenario this feature targets. Engine-computed
-  // lines are left untouched to avoid any risk to existing calculations.
-  const canChangeShopRate = !!item.manual && !!item.id && !isVersionSubmitted;
+  // "Change Shop & Rate" targets any BOQ line that points at a real
+  // materials.id — this covers both individually-added materials
+  // (item.manual === true, added via "+ Add Item") AND materials that come
+  // from a product's engine-computed material list (item.manual === false,
+  // added via "+ Add Product"). Either way `item.id` is the materials.id for
+  // that line (see BoqItemCard's id: line.id || line.materialId mapping).
+  const canChangeShopRate = !!item.id && !isVersionSubmitted;
   // Find an unresolved Change Shop & Rate request for this exact material line,
   // so we can show a "pending approval" indicator right on the row (spec §18)
   // instead of only a page-level banner.
@@ -192,7 +193,20 @@ export const BoqItemRow = React.memo(function BoqItemRow({ item, itemIdx, boqIte
             />
           </td>
         )}
-        {!isCompactView && <td className="border px-2 py-2 text-left w-32 text-gray-600">{item.shop_name || "-"}</td>}
+        {!isCompactView && (
+          <td className="border px-2 py-2 text-left w-32 text-gray-600 align-top">
+            <div>{item.shop_name || "-"}</div>
+            {pendingShopRateRequest && (
+              <div
+                className="mt-1 inline-flex flex-col gap-0.5 text-[9px] font-semibold text-indigo-700 bg-indigo-50 border border-indigo-200 rounded px-1 py-0.5"
+                title="Change Shop & Rate request is pending Materials Approval"
+              >
+                <span>Pending: {pendingShopRateRequest.requested_shop_name || "New Shop"} | ₹{Number(pendingShopRateRequest.rate).toLocaleString()}</span>
+                <span className="uppercase tracking-wide">Material Approval Pending</span>
+              </div>
+            )}
+          </td>
+        )}
         {!isCompactView && <td className="border px-2 py-2 text-left w-[300px] text-gray-600 truncate max-w-[300px] hover:cursor-help hover:bg-blue-50" title={item.description || "-"}>{item.description || "-"}</td>}
         <td className="border px-2 py-2 text-center w-16">{item.unit || "-"}</td>
         <td className="border px-2 py-2 text-center w-20 font-medium">{(item.qtyPerSqf ?? 0).toFixed(3)}</td>
@@ -301,8 +315,31 @@ export const BoqItemRow = React.memo(function BoqItemRow({ item, itemIdx, boqIte
             {!isBifProd && (
               <Button variant="ghost" size="sm" className="h-6 w-6 p-0 text-red-600 hover:text-red-800 hover:bg-red-50" onClick={() => handleDeleteRow(boqItem.id, tableData, itemIdx, item)} disabled={isVersionSubmitted} title="Delete Item"><Trash2 className="h-3 w-3" /></Button>
             )}
+            {canChangeShopRate && (
+              <Button
+                variant="ghost" size="sm" className="h-6 w-6 p-0 text-indigo-600 hover:text-indigo-800 hover:bg-indigo-50"
+                onClick={() => setChangeShopRateOpen(true)}
+                title="Change Shop & Rate"
+              >
+                <Store className="h-3 w-3" />
+              </Button>
+            )}
           </div>
         </td>
+        {canChangeShopRate && (
+          <ChangeShopRateDialog
+            open={changeShopRateOpen}
+            onOpenChange={setChangeShopRateOpen}
+            materialId={item.id}
+            materialName={item.title || item.description || item.name || "This material"}
+            currentShopName={item.shop_name}
+            currentRate={item.rateSqft}
+            unit={item.unit}
+            boqItemId={boqItem.id}
+            boqVersionId={selectedVersionId}
+            onSubmitted={onBomShopRateSubmitted}
+          />
+        )}
       </tr>
     );
   }

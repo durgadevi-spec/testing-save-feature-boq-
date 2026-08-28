@@ -603,6 +603,15 @@ export const BoqItemCard = React.memo(function BoqItemCard({ boqItem, boqIdx, is
               </div>
 
               <div className="flex items-center gap-2">
+                {bomShopRateRequests?.some(r => r.boq_item_id === boqItem.id && (r.approved === null || r.approved === undefined)) && (
+                  <span className="text-[10px] font-bold text-amber-600 bg-amber-50 px-2 py-1 rounded border border-amber-200 flex items-center gap-1.5 uppercase tracking-wider h-7">
+                    <span className="relative flex h-2 w-2">
+                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75"></span>
+                      <span className="relative inline-flex rounded-full h-2 w-2 bg-amber-500"></span>
+                    </span>
+                    Awaiting Approval
+                  </span>
+                )}
                 {!tableData.is_finalized && (
                   <Button variant="outline" size="sm" className="h-7 text-xs border-slate-300 font-bold" disabled={isVersionSubmitted || !bomButtonsEnabled} onClick={() => handleAddItem(boqItem.id)}>+ Add Item</Button>
                 )}

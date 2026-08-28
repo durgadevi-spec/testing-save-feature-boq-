@@ -900,9 +900,27 @@ export async function registerRoutes(
 
   // Ensure material_submissions table has required columns
   try {
-
-
-
+    // "Generate BOM: Change Shop & Rate" — lets a user request a different
+    // shop + rate for a material already used on a BOQ line. These rows piggy-back
+    // on the existing material_submissions table (so they show up on the same
+    // Materials Approval screen as other material requests) but describe a
+    // change to an *already-approved* material rather than a brand-new one,
+    // so template_id is not applicable and must be nullable.
+    const materialSubmissionCols = [
+      "ALTER TABLE material_submissions ADD COLUMN IF NOT EXISTS source VARCHAR(50) DEFAULT 'new_material'",
+      "ALTER TABLE material_submissions ADD COLUMN IF NOT EXISTS previous_material_id VARCHAR(100)",
+      "ALTER TABLE material_submissions ADD COLUMN IF NOT EXISTS material_name VARCHAR(255)",
+      "ALTER TABLE material_submissions ADD COLUMN IF NOT EXISTS previous_shop_name VARCHAR(255)",
+      "ALTER TABLE material_submissions ADD COLUMN IF NOT EXISTS previous_rate DECIMAL(15,2)",
+      "ALTER TABLE material_submissions ADD COLUMN IF NOT EXISTS requested_shop_name VARCHAR(255)",
+      "ALTER TABLE material_submissions ADD COLUMN IF NOT EXISTS boq_item_id VARCHAR(100)",
+      "ALTER TABLE material_submissions ADD COLUMN IF NOT EXISTS boq_version_id VARCHAR(100)",
+      "ALTER TABLE material_submissions ALTER COLUMN template_id DROP NOT NULL",
+    ];
+    for (const sql of materialSubmissionCols) {
+      try { await query(sql); } catch { /* column may already exist / already nullable */ }
+    }
+    console.log("[db] material_submissions columns ensured (Change Shop & Rate support)");
 
 
 
@@ -4791,6 +4809,154 @@ export async function registerRoutes(
     },
   );
 
+  // ── Generate BOM: Change Shop & Rate (new, isolated feature) ───────────
+  // POST /api/material-submissions/bom-shop-rate - Request a different shop
+  // + rate for a material already used on a Generate BOM line. Creates a
+  // material_submissions row (source='generate_bom') so it shows up on the
+  // same Materials Approval screen as other material requests. The BOM line
+  // itself is left untouched until an admin approves the request.
+  app.post(
+    "/api/material-submissions/bom-shop-rate",
+    authMiddleware,
+    async (req: Request, res: Response) => {
+      try {
+        const { previous_material_id, new_shop_id, new_rate, boq_item_id, boq_version_id } = req.body;
+
+        if (!previous_material_id || !new_shop_id || new_rate === undefined || new_rate === null || !boq_item_id) {
+          res.status(400).json({ message: "previous_material_id, new_shop_id, new_rate and boq_item_id are required" });
+          return;
+        }
+
+        const parsedRate = Number(new_rate);
+        if (!Number.isFinite(parsedRate) || parsedRate < 0) {
+          res.status(400).json({ message: "new_rate must be a valid non-negative number" });
+          return;
+        }
+
+        // Look up the new shop's name for display
+        const shopResult = await query("SELECT id, name FROM shops WHERE id = $1", [new_shop_id]);
+        if (shopResult.rows.length === 0) {
+          res.status(404).json({ message: "Selected shop was not found" });
+          return;
+        }
+        const requestedShopName = shopResult.rows[0].name;
+
+        // Look up the current shop/rate/name for this exact line on this BOQ
+        // item, so the approval screen can show a clear before/after — pulled
+        // from the live boq_items row (per-project pricing may differ from
+        // the materials catalog default).
+        let previousShopName: string | null = null;
+        let previousRate: number | null = null;
+        let materialName: string | null = null;
+        let unit: string | null = null;
+        try {
+          const itemResult = await query("SELECT table_data FROM boq_items WHERE id = $1", [boq_item_id]);
+          if (itemResult.rows.length > 0) {
+            const tableData = typeof itemResult.rows[0].table_data === "string"
+              ? JSON.parse(itemResult.rows[0].table_data)
+              : itemResult.rows[0].table_data;
+            const matchLine = (line: any) => (line?.id === previous_material_id || line?.materialId === previous_material_id);
+            const line =
+              (tableData?.materialLines || []).find(matchLine) ||
+              (tableData?.step11_items || []).find(matchLine);
+            if (line) {
+              previousShopName = line.shop_name ?? null;
+              previousRate = Number(
+                line.supplyRate !== undefined ? line.supplyRate : (line.supply_rate ?? line.rateSqft ?? line.rate ?? 0)
+              );
+              materialName = line.name || line.title || line.description || null;
+              unit = line.unit || null;
+            }
+          }
+        } catch (e) {
+          console.warn("[POST /api/material-submissions/bom-shop-rate] Could not look up current line for previous shop/rate", e);
+        }
+
+        // Fall back to the materials catalog row if the line lookup above failed
+        if (previousShopName === null || previousRate === null || !materialName) {
+          try {
+            const matResult = await query(
+              `SELECT m.rate, m.unit, COALESCE(mt.name, m.name) as name, s.name as shop_name
+               FROM materials m
+               LEFT JOIN material_templates mt ON m.template_id = mt.id
+               LEFT JOIN shops s ON m.shop_id = s.id
+               WHERE m.id = $1`,
+              [previous_material_id],
+            );
+            if (matResult.rows.length > 0) {
+              const m = matResult.rows[0];
+              if (previousShopName === null) previousShopName = m.shop_name;
+              if (previousRate === null) previousRate = Number(m.rate);
+              if (!materialName) materialName = m.name;
+              if (!unit) unit = m.unit;
+            }
+          } catch (e) {
+            console.warn("[POST /api/material-submissions/bom-shop-rate] Could not look up materials catalog fallback", e);
+          }
+        }
+
+        const id = randomUUID();
+        const result = await query(
+          `INSERT INTO material_submissions (
+            id, source, previous_material_id, material_name, unit, shop_id,
+            rate, previous_shop_name, previous_rate, requested_shop_name,
+            boq_item_id, boq_version_id, submitted_by, submitted_at, approved
+          ) VALUES ($1, 'generate_bom', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW(), NULL)
+          RETURNING *`,
+          [
+            id,
+            previous_material_id,
+            materialName,
+            unit,
+            new_shop_id,
+            parsedRate,
+            previousShopName,
+            previousRate,
+            requestedShopName,
+            boq_item_id,
+            boq_version_id || null,
+            (req as any).user?.id,
+          ],
+        );
+
+        res.status(201).json({ submission: result.rows[0] });
+      } catch (err: any) {
+        console.error("/api/material-submissions/bom-shop-rate POST error", err);
+        res.status(500).json({ message: "failed to submit shop/rate change request" });
+      }
+    },
+  );
+
+  // GET /api/material-submissions/bom-pending - List Change Shop & Rate
+  // requests for a given BOQ version (used to show pending badges on BOQ
+  // lines and to keep "Submit for Approval" disabled while any are unresolved).
+  app.get(
+    "/api/material-submissions/bom-pending",
+    authMiddleware,
+    async (req: Request, res: Response) => {
+      try {
+        const { boq_version_id } = req.query;
+        if (!boq_version_id) {
+          res.json({ requests: [] });
+          return;
+        }
+        const result = await query(
+          `SELECT id, previous_material_id, boq_item_id, boq_version_id, material_name, unit,
+                  shop_id, rate, previous_shop_name, previous_rate, requested_shop_name,
+                  submitted_by, submitted_at, approved, approval_reason
+           FROM material_submissions
+           WHERE source = 'generate_bom' AND boq_version_id = $1
+           ORDER BY submitted_at DESC`,
+          [boq_version_id],
+        );
+        res.json({ requests: result.rows });
+      } catch (err: any) {
+        console.error("/api/material-submissions/bom-pending GET error", err);
+        res.status(500).json({ message: "failed to fetch shop/rate change requests" });
+      }
+    },
+  );
+
   // GET /api/supplier/my-shops - Get shops owned by the current supplier
   app.get(
     "/api/supplier/my-shops",
@@ -4971,10 +5137,20 @@ export async function registerRoutes(
     async (_req, res) => {
       try {
         const result = await query(`
-          SELECT ms.*, mt.name as template_name, mt.code as template_code, mt.category as template_category, s.name as shop_name, u.username as submitted_by_username
+          SELECT ms.*, 
+                 COALESCE(mt.name, mt2.name, m.name) as template_name, 
+                 COALESCE(mt.code, mt2.code, m.code) as template_code, 
+                 COALESCE(mt.category, mt2.category, m.category) as template_category,
+                 COALESCE(ms.brandname, m.brandname) as brandname,
+                 COALESCE(ms.subcategory, m.subcategory) as subcategory,
+                 COALESCE(ms.technicalspecification, m.technicalspecification) as technicalspecification,
+                 s.name as shop_name, 
+                 u.username as submitted_by_username
           FROM material_submissions ms
-          JOIN material_templates mt ON ms.template_id = mt.id
-          JOIN shops s ON ms.shop_id = s.id
+          LEFT JOIN material_templates mt ON ms.template_id = mt.id
+          LEFT JOIN materials m ON ms.previous_material_id IS NOT NULL AND ms.previous_material_id::uuid = m.id
+          LEFT JOIN material_templates mt2 ON m.template_id = mt2.id
+          LEFT JOIN shops s ON ms.shop_id = s.id
           LEFT JOIN users u ON ms.submitted_by = u.id
           WHERE ms.approved IS NULL
           ORDER BY ms.submitted_at DESC
@@ -5021,11 +5197,101 @@ export async function registerRoutes(
           res.status(400).json({ message: "This submission has already been approved." });
           return;
         }
-        const templateResult = await query(
-          "SELECT * FROM material_templates WHERE id = $1",
-          [submission.template_id],
-        );
-        const template = templateResult.rows[0];
+
+        // Generate BOM: Change Shop & Rate — this is a request to change the
+        // shop/rate of an EXISTING material on a BOQ line, not a brand-new
+        // catalog material, so it skips the materials-table insert entirely
+        // and instead writes the new shop/rate onto the specific BOQ line.
+        if (submission.source === "generate_bom") {
+          const updateResult = await query(
+            "UPDATE material_submissions SET approved = true WHERE id = $1 RETURNING *",
+            [id],
+          );
+          const approvedReq = updateResult.rows[0];
+
+          try {
+            const itemResult = await query("SELECT table_data FROM boq_items WHERE id = $1", [approvedReq.boq_item_id]);
+            if (itemResult.rows.length > 0) {
+              const tableData = typeof itemResult.rows[0].table_data === "string"
+                ? JSON.parse(itemResult.rows[0].table_data)
+                : itemResult.rows[0].table_data;
+              const matchLine = (line: any) => (line?.id === approvedReq.previous_material_id || line?.materialId === approvedReq.previous_material_id);
+              let updated = false;
+
+              if (tableData && Array.isArray(tableData.materialLines)) {
+                tableData.materialLines = tableData.materialLines.map((line: any) => {
+                  if (matchLine(line)) {
+                    line.shop_name = approvedReq.requested_shop_name;
+                    line.shop_id = approvedReq.shop_id;
+                    line.supplyRate = Number(approvedReq.rate);
+                    line.installRate = 0;
+                    updated = true;
+                  }
+                  return line;
+                });
+              }
+              if (tableData && Array.isArray(tableData.step11_items)) {
+                tableData.step11_items = tableData.step11_items.map((line: any) => {
+                  if (matchLine(line)) {
+                    line.shop_name = approvedReq.requested_shop_name;
+                    line.shop_id = approvedReq.shop_id;
+                    line.supply_rate = Number(approvedReq.rate);
+                    line.install_rate = 0;
+                    updated = true;
+                  }
+                  return line;
+                });
+              }
+              if (updated) {
+                await query(`UPDATE boq_items SET table_data = $1 WHERE id = $2`, [JSON.stringify(tableData), approvedReq.boq_item_id]);
+              }
+            }
+
+            const approvedBy = (req as any).user?.id;
+            const approvedByName = (req as any).user?.fullName || (req as any).user?.username;
+            await query(
+              `INSERT INTO boq_history (version_id, user_id, user_full_name, action, reason)
+               VALUES ($1, $2, $3, $4, $5)`,
+              [
+                approvedReq.boq_version_id,
+                approvedBy,
+                approvedByName,
+                "Shop & Rate Change Approved",
+                JSON.stringify({
+                  material_name: approvedReq.material_name,
+                  previous_shop_name: approvedReq.previous_shop_name,
+                  previous_rate: approvedReq.previous_rate,
+                  new_shop_name: approvedReq.requested_shop_name,
+                  new_rate: approvedReq.rate,
+                  approved_by: approvedByName,
+                  status: "approved",
+                }),
+              ],
+            );
+          } catch (e) {
+            console.error("[POST /api/material-submissions/:id/approve] Failed to apply generate_bom shop/rate change to BOQ line", e);
+          }
+
+          // Instead of returning early, we let it fall through to create a new material entry
+          // as requested, so the new shop/rate is available globally.
+          // res.json({ submission: approvedReq });
+          // return;
+        }
+
+        let template: any = {};
+        if (submission.template_id) {
+          const templateResult = await query(
+            "SELECT * FROM material_templates WHERE id = $1",
+            [submission.template_id],
+          );
+          template = templateResult.rows[0] || {};
+        } else if (submission.previous_material_id) {
+          const templateResult = await query(
+            "SELECT * FROM materials WHERE id = $1",
+            [submission.previous_material_id],
+          );
+          template = templateResult.rows[0] || {};
+        }
 
         const materialId = randomUUID();
         await query(
@@ -5033,18 +5299,18 @@ export async function registerRoutes(
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, true, $17)`,
           [
             materialId,
-            template.name,
+            template.name || submission.material_name,
             template.code,
             submission.rate,
             submission.shop_id,
-            submission.unit,
+            submission.unit || template.unit,
             submission.category || template.category,
-            submission.brandname,
-            submission.modelnumber,
+            submission.brandname || template.brandname,
+            submission.modelnumber || template.modelnumber,
             submission.subcategory || template.subcategory,
-            submission.product,
-            submission.technicalspecification,
-            submission.template_id,
+            submission.product || template.product,
+            submission.technicalspecification || template.technicalspecification,
+            submission.template_id || template.template_id,
             submission.image || template.image || null,
             submission.hsn_code || submission.hsnCode || template.hsn_code || null,
             submission.sac_code || submission.sacCode || template.sac_code || null,
@@ -5158,6 +5424,38 @@ export async function registerRoutes(
         );
 
         const submission = result.rows[0];
+
+        // Generate BOM: Change Shop & Rate — the BOQ line was never touched
+        // while the request was pending, so there's nothing to revert. Just
+        // record the rejection; no supplier-facing email for this type.
+        if (submission?.source === "generate_bom") {
+          try {
+            await query(
+              `INSERT INTO boq_history (version_id, user_id, user_full_name, action, reason)
+               VALUES ($1, $2, $3, $4, $5)`,
+              [
+                submission.boq_version_id,
+                (req as any).user?.id,
+                (req as any).user?.fullName || (req as any).user?.username,
+                "Shop & Rate Change Rejected",
+                JSON.stringify({
+                  material_name: submission.material_name,
+                  previous_shop_name: submission.previous_shop_name,
+                  previous_rate: submission.previous_rate,
+                  requested_shop_name: submission.requested_shop_name,
+                  requested_rate: submission.rate,
+                  rejected_by: (req as any).user?.fullName || (req as any).user?.username,
+                  reason: reason || "No reason provided",
+                  status: "rejected",
+                }),
+              ],
+            );
+          } catch (e) {
+            console.warn("[POST /api/material-submissions/:id/reject] Failed to record generate_bom rejection history", e);
+          }
+          res.json({ submission });
+          return;
+        }
 
         // Notify the submitter by email that their material was rejected.
         if (submission) {
@@ -8621,9 +8919,9 @@ export async function registerRoutes(
         // For "save_as", no locking needed — the source product is unchanged.
         const updatedStep11 = type === "save"
           ? step11Items.map((it: any, idx: number) => {
-              if (!validIndexes.includes(idx)) return it;
-              return { ...it, manualApproval: { status: "pending", requestId: request.id, type, submittedAt: new Date().toISOString() } };
-            })
+            if (!validIndexes.includes(idx)) return it;
+            return { ...it, manualApproval: { status: "pending", requestId: request.id, type, submittedAt: new Date().toISOString() } };
+          })
           : step11Items;
         const updatedTableData = { ...tableData, step11_items: updatedStep11 };
         await query(
@@ -8725,9 +9023,9 @@ export async function registerRoutes(
           const updatedStep11 = step11Items.map((it: any, idx: number) => {
             if (!itemIndexes.includes(idx)) return it;
             if (!it.manualApproval || it.manualApproval.requestId !== id) return it;
-            
+
             newItemsToInsert.push(it);
-            
+
             return { ...it, manualApproval: { ...it.manualApproval, status: "approved", decidedAt: new Date().toISOString() } };
           });
           const updatedTableData = { ...tableData, step11_items: updatedStep11 };
@@ -8736,53 +9034,53 @@ export async function registerRoutes(
           // Also insert into the global product library (step11_product_items)
           // Find the active config for this product
           if (tableData.product_id && newItemsToInsert.length > 0) {
-              const activeConfigRes = await query(
-                  `SELECT id FROM step11_products WHERE product_id = $1 ORDER BY created_at DESC LIMIT 1`,
-                  [tableData.product_id]
-              );
-              
-              if (activeConfigRes.rowCount && activeConfigRes.rowCount > 0) {
-                  const step11ProductId = activeConfigRes.rows[0].id;
-                  
-                  for (const item of newItemsToInsert) {
-                      await query(
-                        `INSERT INTO step11_product_items 
+            const activeConfigRes = await query(
+              `SELECT id FROM step11_products WHERE product_id = $1 ORDER BY created_at DESC LIMIT 1`,
+              [tableData.product_id]
+            );
+
+            if (activeConfigRes.rowCount && activeConfigRes.rowCount > 0) {
+              const step11ProductId = activeConfigRes.rows[0].id;
+
+              for (const item of newItemsToInsert) {
+                await query(
+                  `INSERT INTO step11_product_items 
                          (step11_product_id, material_id, material_name, unit, qty, supply_rate, install_rate, rate, amount, location, freeze_and_edit, apply_wastage, shop_name, base_qty, wastage_pct)
                          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
-                        [
-                          step11ProductId,
-                          item.id || item.material_id || item.materialId || "00000000-0000-0000-0000-000000000000",
-                          item.name || item.title || item.material_name,
-                          item.unit || "nos",
-                          item.qty || 0,
-                          item.supplyRate ?? item.supply_rate ?? 0,
-                          item.installRate ?? item.install_rate ?? 0,
-                          (item.supplyRate ?? item.supply_rate ?? 0) + (item.installRate ?? item.install_rate ?? 0),
-                          (item.qty || 0) * ((item.supplyRate ?? item.supply_rate ?? 0) + (item.installRate ?? item.install_rate ?? 0)),
-                          item.location || "",
-                          item.freezeAndEdit === true || item.freeze_and_edit === true,
-                          item.applyWastage !== undefined ? item.applyWastage : true,
-                          item.shopName || item.shop_name || null,
-                          item.baseQty ?? item.qty ?? 0,
-                          item.wastagePct !== undefined ? item.wastagePct : null
-                        ]
-                      );
-                  }
-                  
-                  // Update total cost of the config
-                  await query(
-                      `UPDATE step11_products 
+                  [
+                    step11ProductId,
+                    item.id || item.material_id || item.materialId || "00000000-0000-0000-0000-000000000000",
+                    item.name || item.title || item.material_name,
+                    item.unit || "nos",
+                    item.qty || 0,
+                    item.supplyRate ?? item.supply_rate ?? 0,
+                    item.installRate ?? item.install_rate ?? 0,
+                    (item.supplyRate ?? item.supply_rate ?? 0) + (item.installRate ?? item.install_rate ?? 0),
+                    (item.qty || 0) * ((item.supplyRate ?? item.supply_rate ?? 0) + (item.installRate ?? item.install_rate ?? 0)),
+                    item.location || "",
+                    item.freezeAndEdit === true || item.freeze_and_edit === true,
+                    item.applyWastage !== undefined ? item.applyWastage : true,
+                    item.shopName || item.shop_name || null,
+                    item.baseQty ?? item.qty ?? 0,
+                    item.wastagePct !== undefined ? item.wastagePct : null
+                  ]
+                );
+              }
+
+              // Update total cost of the config
+              await query(
+                `UPDATE step11_products 
                        SET total_cost = (
                            SELECT COALESCE(SUM(qty * (COALESCE(supply_rate, 0) + COALESCE(install_rate, 0))), 0) 
                            FROM step11_product_items 
                            WHERE step11_product_id = $1
                        )
                        WHERE id = $1`,
-                      [step11ProductId]
-                  );
-              }
+                [step11ProductId]
+              );
+            }
           }
-          
+
         } else {
           // save_as: create a brand new Product Card from the approved
           // snapshot, using the same insert shape as the existing manual
@@ -8940,9 +9238,9 @@ export async function registerRoutes(
 
           // 5. Update the newTableData to link to the global product
           (newTableData as any).product_id = globalProductId;
-          
+
           // 6. Insert into current BOM (fix varchar 50 error on estimator)
-          const estimatorId = `save_as_${id.substring(0,8)}`;
+          const estimatorId = `save_as_${id.substring(0, 8)}`;
           await query(
             `INSERT INTO boq_items (id, project_id, estimator, table_data, version_id, user_added, sort_order, computed_value, created_at)
              VALUES ($1, $2, $3, $4, $5, true, $6, $7, NOW())`,

@@ -151,10 +151,10 @@ export function ChangeShopRateDialog({
                                             <ChevronsUpDown className="h-4 w-4 opacity-50" />
                                         </Button>
                                     </PopoverTrigger>
-                                    <PopoverContent className="w-[--radix-popover-trigger-width] p-0" align="start">
+                                    <PopoverContent style={{ width: "var(--radix-popover-trigger-width)" }} className="p-0" align="start" side="bottom">
                                         <Command shouldFilter={false}>
                                             <CommandInput placeholder="Search shop..." value={shopQuery} onValueChange={setShopQuery} />
-                                            <CommandList>
+                                            <CommandList className="max-h-[200px]">
                                                 {loadingShops ? (
                                                     <div className="flex items-center justify-center py-4 text-sm text-slate-500">
                                                         <Loader2 className="h-4 w-4 animate-spin mr-2" /> Loading shops...
