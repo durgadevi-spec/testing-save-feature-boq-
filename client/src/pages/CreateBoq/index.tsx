@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useRef, useCallback, useMemo } from "react";
 import { Reorder, useDragControls } from "framer-motion";
-import { ChevronUp, ChevronDown, Loader2, CheckCircle2, XCircle, Lock, History, Clock, Briefcase, MapPin, IndianRupee, GripVertical, Search, ArrowUp, ArrowLeft, ArrowRight, ArrowDown, Plus, Trash2, Save, MessageSquare, Users, ChevronsUpDown, Check, X, RefreshCw, Star, Edit, Reply, AlertTriangle, Zap } from "lucide-react";
+import { ChevronUp, ChevronDown, Loader2, CheckCircle2, XCircle, Lock, History, Clock, Briefcase, MapPin, IndianRupee, GripVertical, Search, ArrowUp, ArrowLeft, ArrowRight, ArrowDown, Plus, Trash2, Save, MessageSquare, Users, ChevronsUpDown, Check, X, RefreshCw, Star, Edit, Reply, AlertTriangle, Zap, Store } from "lucide-react";
 import { fuzzySearch, cn } from "@/lib/utils";
 import { Layout } from "@/components/layout/Layout";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
@@ -245,6 +245,7 @@ export default function CreateBom() {
   const [approvals, setApprovals] = useState<any[]>([]);
   const [approvalsModalOpen, setApprovalsModalOpen] = useState(false);
   const [rateChangeRequests, setRateChangeRequests] = useState<any[]>([]);
+  const [bomShopRateRequests, setBomShopRateRequests] = useState<any[]>([]);
   const [rateActionLoading, setRateActionLoading] = useState<string | null>(null);
   const [loadingApprovals, setLoadingApprovals] = useState(false);
   const [approvalActionLoading, setApprovalActionLoading] = useState<string | null>(null);
@@ -356,6 +357,41 @@ export default function CreateBom() {
       fetchApprovals();
     }
   }, [activeTab, user?.role, fetchApprovals]);
+
+  // ── Generate BOM: Change Shop & Rate (new, isolated feature) ───────────
+  // Pending requests here are Material Requests (material_submissions with
+  // source='generate_bom') created from the Change Shop & Rate dialog on a
+  // BOQ material line. They must go through Materials Approval, so this page
+  // just needs to know whether any are still unresolved for this version in
+  // order to keep "Submit for Approval" disabled — the same pattern already
+  // used for Amend Rate requests above.
+  const fetchBomShopRateRequests = useCallback(async () => {
+    if (!selectedVersionId) { setBomShopRateRequests([]); return; }
+    try {
+      const res = await apiFetch(`/api/material-submissions/bom-pending?boq_version_id=${selectedVersionId}`);
+      if (res.ok) {
+        const data = await res.json();
+        setBomShopRateRequests(data.requests || []);
+      }
+    } catch (err) {
+      console.error("Failed to fetch BOM shop/rate change requests", err);
+    }
+  }, [selectedVersionId]);
+
+  useEffect(() => {
+    fetchBomShopRateRequests();
+  }, [fetchBomShopRateRequests]);
+
+  const hasPendingBomShopRateChanges = bomShopRateRequests.some((r) => r.approved === null || r.approved === undefined);
+
+  // Lightweight poll while a request is pending, so an admin's decision made
+  // elsewhere (or in another tab) is picked up without a manual reload.
+  useEffect(() => {
+    if (!hasPendingBomShopRateChanges) return;
+    const interval = setInterval(() => { fetchBomShopRateRequests(); }, 15000);
+    return () => clearInterval(interval);
+  }, [hasPendingBomShopRateChanges, fetchBomShopRateRequests]);
+
 
 
   const handleRateAction = async (id: string, action: 'approve' | 'reject') => {
@@ -4016,6 +4052,8 @@ export default function CreateBom() {
                                             setBoqItems(reordered);
                                             apiFetch('/api/boq-items/reorder', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ itemIds: reordered.map(i => i.id) }) }).catch(console.error);
                                           }}
+                                          onBomShopRateChangeSubmitted={fetchBomShopRateRequests}
+                                          bomShopRateRequests={bomShopRateRequests}
                                         />
                                       </div>
                                     );
@@ -4066,7 +4104,7 @@ export default function CreateBom() {
                       {!isReadOnlyMode && (
                         <>
                           <Button onClick={withBudgetCheck(() => currentProjectValue, handleSaveProject)} variant="outline" disabled={isVersionSubmitted || Object.keys(editedFields).length === 0}>Save Draft</Button>
-                          <Button onClick={() => handleSubmitVersion("submitted")} variant="outline" className="border-primary text-primary hover:bg-primary/5 font-bold" disabled={isVersionSubmitted || boqItems.length === 0 || hasPendingRateAmendments} title={hasPendingRateAmendments ? "Cannot lock: There are rate amendments that must be submitted and approved first." : undefined}>Lock Version</Button>
+                          <Button onClick={() => handleSubmitVersion("submitted")} variant="outline" className="border-primary text-primary hover:bg-primary/5 font-bold" disabled={isVersionSubmitted || boqItems.length === 0 || hasPendingRateAmendments || hasPendingBomShopRateChanges} title={(hasPendingRateAmendments || hasPendingBomShopRateChanges) ? "Cannot lock: There are material or rate change requests that must be approved first." : undefined}>Lock Version</Button>
                           {rateAmendmentSummary.hasDraft ? (
                             <Button onClick={handleSubmitRateAmendRequests} variant="default" className="bg-amber-600 hover:bg-amber-700 font-bold" title="Send the amended rate(s) to admin for approval">
                               Submit Rate Amend Request
@@ -4074,6 +4112,10 @@ export default function CreateBom() {
                           ) : rateAmendmentSummary.hasPending ? (
                             <Button variant="default" className="bg-amber-300 font-bold cursor-not-allowed" disabled title="Waiting for admin to approve or reject the submitted rate change request(s)">
                               Awaiting Rate Approval
+                            </Button>
+                          ) : hasPendingBomShopRateChanges ? (
+                            <Button variant="default" className="bg-indigo-300 font-bold cursor-not-allowed" disabled title="Waiting for admin to approve or reject the submitted shop/rate change request(s)">
+                              Awaiting Shop/Rate Approval
                             </Button>
                           ) : (
                             <Button onClick={() => handleSubmitVersion("pending_approval")} variant="default" className="bg-primary hover:bg-primary/90 font-bold" disabled={isVersionSubmitted || boqItems.length === 0}>Submit for Approval</Button>
@@ -4093,6 +4135,12 @@ export default function CreateBom() {
                       <div className="col-span-full flex items-center gap-2 mt-2 p-2 rounded-md bg-orange-50 border border-orange-200 text-orange-700 text-xs font-semibold">
                         <AlertTriangle className="h-4 w-4 text-orange-500 shrink-0" />
                         <span>Rate change request submitted. Waiting for admin approval — Submit for Approval will become available once approved.</span>
+                      </div>
+                    )}
+                    {hasPendingBomShopRateChanges && (
+                      <div className="col-span-full flex items-center gap-2 mt-2 p-2 rounded-md bg-indigo-50 border border-indigo-200 text-indigo-700 text-xs font-semibold">
+                        <Store className="h-4 w-4 text-indigo-500 shrink-0" />
+                        <span>One or more materials have a Change Shop & Rate request awaiting Materials Approval — Submit for Approval will unlock once resolved.</span>
                       </div>
                     )}
                   </CardContent>

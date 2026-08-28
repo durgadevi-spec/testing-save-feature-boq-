@@ -4967,7 +4967,7 @@ export async function registerRoutes(
   app.get(
     "/api/material-submissions-pending-approval",
     authMiddleware,
-    requireRole("admin", "software_team", "purchase_team"),
+    requireRole("admin", "software_team", "purchase_team", "finance_team"),
     async (_req, res) => {
       try {
         const result = await query(`
@@ -5000,7 +5000,7 @@ export async function registerRoutes(
   app.post(
     "/api/material-submissions/:id/approve",
     authMiddleware,
-    requireRole("admin", "software_team", "purchase_team"),
+    requireRole("admin", "software_team", "purchase_team", "finance_team"),
     async (req: Request, res: Response) => {
       try {
         const { id } = req.params;
@@ -5146,7 +5146,7 @@ export async function registerRoutes(
   app.post(
     "/api/material-submissions/:id/reject",
     authMiddleware,
-    requireRole("admin", "software_team", "purchase_team"),
+    requireRole("admin", "software_team", "purchase_team", "finance_team"),
     async (req: Request, res: Response) => {
       try {
         const { id } = req.params;

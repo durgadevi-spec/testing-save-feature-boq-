@@ -44,7 +44,7 @@ import { EditableHsnSac } from './EditableHsnSac';
 import { BoqItemRow } from './BoqItemRow';
 import { SaveConfirmDialog, SaveAsWizardDialog, PendingManualItem } from './ManualItemSaveDialogs';
 
-export const BoqItemCard = React.memo(function BoqItemCard({ boqItem, boqIdx, isVersionSubmitted, expandedProductIds, setExpandedProductIds, getEditedValue, updateEditedField, handleDeleteRow, handleFinalizeProduct, handleAddItem, loadBoqItemsAndEdits, setBoqItems, checkBudgetEarly, handleSaveProject, onCardDragStart, onCardDragOver, onCardDrop, isCardDragOver, mismatches, isCompactView, onSaveAsTemplate, editedFields, comments, users, currentUser, onAddComment, selectedVersionId, totalProducts, onProductOrdinalChange, itemCategoryFilter, bomButtonsEnabled, onAnalysis, allProductNames }: {
+export const BoqItemCard = React.memo(function BoqItemCard({ boqItem, boqIdx, isVersionSubmitted, expandedProductIds, setExpandedProductIds, getEditedValue, updateEditedField, handleDeleteRow, handleFinalizeProduct, handleAddItem, loadBoqItemsAndEdits, setBoqItems, checkBudgetEarly, handleSaveProject, onCardDragStart, onCardDragOver, onCardDrop, isCardDragOver, mismatches, isCompactView, onSaveAsTemplate, editedFields, comments, users, currentUser, onAddComment, selectedVersionId, totalProducts, onProductOrdinalChange, itemCategoryFilter, bomButtonsEnabled, onAnalysis, allProductNames, onBomShopRateChangeSubmitted, bomShopRateRequests }: {
   boqItem: BOMItem; boqIdx: number; isVersionSubmitted: boolean;
   expandedProductIds: Set<string>; setExpandedProductIds: (fn: (p: Set<string>) => Set<string>) => void;
   getEditedValue: (k: string, f: string, v: any) => any;
@@ -75,6 +75,8 @@ export const BoqItemCard = React.memo(function BoqItemCard({ boqItem, boqIdx, is
   bomButtonsEnabled?: boolean;
   onAnalysis: (productName: string) => void;
   allProductNames?: string[];
+  onBomShopRateChangeSubmitted?: () => void;
+  bomShopRateRequests?: any[];
 }) {
   const { toast } = useToast();
   const tableData = parseTableData(boqItem.table_data);
@@ -861,6 +863,11 @@ export const BoqItemCard = React.memo(function BoqItemCard({ boqItem, boqIdx, is
                           newOrder.splice(toIdx, 0, moved);
                           handleRowReorder(newOrder);
                         }}
+                        onBomShopRateSubmitted={() => {
+                          loadBoqItemsAndEdits();
+                          onBomShopRateChangeSubmitted?.();
+                        }}
+                        bomShopRateRequests={bomShopRateRequests}
                       />
                     ))
                 }

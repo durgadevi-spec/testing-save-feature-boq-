@@ -2113,8 +2113,7 @@ export default function AdminDashboard() {
 
   const isVoltAmpele = user?.username === "VoltAmpele@gmail.com";
 
-  const canApproveReject =
-    user?.role === "admin" || user?.role === "software_team" || user?.role === "purchase_team" || isVoltAmpele;
+
 
   const isProductManager = user?.role === "product_manager";
 
@@ -2157,6 +2156,11 @@ export default function AdminDashboard() {
     if (isCustomManaged) return customModules.has(key);
     return defaultVal;
   };
+
+  const canApproveReject = hasPerm(
+    user?.role === "admin" || user?.role === "software_team" || user?.role === "purchase_team" || isVoltAmpele,
+    "material_approvals"
+  );
 
   const canEditDelete = hasPerm(
     user?.role === "admin" || user?.role === "software_team" || user?.role === "purchase_team",
@@ -4629,7 +4633,7 @@ export default function AdminDashboard() {
           )}
 
           {/* === MATERIAL APPROVALS TAB === */}
-          {(isAdminOrSoftwareTeam || user?.role === "purchase_team") && (
+          {hasPerm(isAdminOrSoftwareTeam || user?.role === "purchase_team", "material_approvals") && (
             <TabsContent value="material-approvals" className="space-y-4 mt-4">
               <Tabs defaultValue="material-requests" className="w-full">
                 <TabsList className="grid w-full grid-cols-2 mb-4">
