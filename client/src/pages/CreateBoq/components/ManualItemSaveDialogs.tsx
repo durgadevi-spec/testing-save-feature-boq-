@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState, useRef, useCallback } from "react";
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter, DialogTrigger } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -10,7 +10,9 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from "@/components/ui/command";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
-import { Loader2, ArrowLeft, ArrowRight, GripVertical, ChevronsUpDown, Check, Layers, Maximize2, Minimize2, Plus } from "lucide-react";
+import { Badge } from "@/components/ui/badge";
+import { Loader2, ArrowLeft, ArrowRight, GripVertical, ChevronsUpDown, Check, Layers, Maximize2, Minimize2, Plus, Search } from "lucide-react";
+import { fuzzySearch } from "@/lib/utils";
 import { computeBoq } from "@/lib/boqCalc";
 import apiFetch from "@/lib/api";
 
@@ -236,6 +238,72 @@ export function SaveAsWizardDialog({
   const [bulkWastage, setBulkWastage] = useState<string>("");
   const [addItemOpen, setAddItemOpen] = useState(false);
 
+  // ── Add Item (master catalog) — mirrors Manage Product's "Add Additional
+  // Materials" dialog so a genuinely new material can be brought in here too,
+  // not just a previously removed row from this same list. ──
+  const [extraItems, setExtraItems] = useState<PendingManualItem[]>([]);
+  const nextExtraIndexRef = useRef(-1);
+  const [availableMaterials, setAvailableMaterials] = useState<any[]>([]);
+  const [loadingMaterials, setLoadingMaterials] = useState(false);
+  const [materialSearch, setMaterialSearch] = useState("");
+
+  useEffect(() => {
+    if (!addItemOpen || availableMaterials.length > 0) return;
+    (async () => {
+      setLoadingMaterials(true);
+      try {
+        const res = await apiFetch("/api/materials");
+        if (res.ok) {
+          const d = await res.json();
+          setAvailableMaterials(Array.isArray(d) ? d : (d.materials || []));
+        }
+      } catch (err) {
+        console.error("Failed to load materials:", err);
+      } finally {
+        setLoadingMaterials(false);
+      }
+    })();
+  }, [addItemOpen]);
+
+  const uniqueMaterials = useMemo(
+    () => Array.from(new Map(availableMaterials.map((m: any) => [(m.id || m.name || Math.random()).toString(), m])).values()),
+    [availableMaterials]
+  );
+
+  const addNewMaterial = (material: any) => {
+    if (allItems.some((it) => it.id && it.id === material.id && configByIndex[it.index]?.selected)) return;
+    const rate = Number(material.rate) || 0;
+    const index = nextExtraIndexRef.current--;
+    const newItem: PendingManualItem = {
+      index,
+      id: material.id,
+      title: material.name,
+      description: material.technicalspecification || material.name || "",
+      unit: material.unit,
+      shop_name: material.shop_name,
+      shop_id: material.shop_id || material.shopId,
+      category: material.category,
+      supply_rate: rate,
+      install_rate: 0,
+      wastagePct: wastagePctDefault,
+    };
+    setExtraItems((prev) => [...prev, newItem]);
+    setConfigByIndex((prev) => ({
+      ...prev,
+      [index]: {
+        selected: true,
+        qty: 1,
+        wastagePct: wastagePctDefault,
+        supplyRate: rate,
+        installRate: 0,
+        freezeAndEdit: false,
+        applyWastage: true,
+        applyRounding: true,
+        description: newItem.description || newItem.title || "",
+      },
+    }));
+  };
+
   const applyBulkEdit = () => {
     if (bulkSelected.size === 0) return;
     setConfigByIndex(prev => {
@@ -286,6 +354,10 @@ export function SaveAsWizardDialog({
     setBulkSelected(new Set());
     setBulkQty("");
     setBulkWastage("");
+    setExtraItems([]);
+    nextExtraIndexRef.current = -1;
+    setAvailableMaterials([]);
+    setMaterialSearch("");
     const initial: Record<number, ItemConfig> = {};
     items.forEach((it) => {
       initial[it.index] = {
@@ -306,8 +378,12 @@ export function SaveAsWizardDialog({
     setConfigByIndex(initial);
   }, [open, items]);
 
-  const selectedItems = useMemo(() => items.filter((it) => configByIndex[it.index]?.selected), [items, configByIndex]);
-  const removedItems = useMemo(() => items.filter((it) => configByIndex[it.index] && !configByIndex[it.index]?.selected), [items, configByIndex]);
+  // All items available to this wizard: the original manual items passed in,
+  // plus any brand-new materials brought in via "+ Add Item" (master catalog).
+  const allItems = useMemo(() => [...items, ...extraItems], [items, extraItems]);
+
+  const selectedItems = useMemo(() => allItems.filter((it) => configByIndex[it.index]?.selected), [allItems, configByIndex]);
+  const removedItems = useMemo(() => allItems.filter((it) => configByIndex[it.index] && !configByIndex[it.index]?.selected), [allItems, configByIndex]);
 
   // Reuse the existing calculation engine (client/src/lib/boqCalc.ts) — a single
   // call over every included line, same as Manage Product, so totals / rate-per-unit
@@ -386,6 +462,10 @@ export function SaveAsWizardDialog({
         title: item.title || item.description,
         name: item.title || item.description,
         description: cfg.description || item.description || item.title,
+        // Manage Product / product_approvals store the per-item free-text
+        // description under "location" (step11_product_items.location) —
+        // mirror it here so it survives approval instead of being dropped.
+        location: cfg.description || item.description || item.title,
         unit: item.unit,
         shop_name: item.shop_name,
         shop_id: item.shop_id,
@@ -662,29 +742,88 @@ export function SaveAsWizardDialog({
               </div>
               <div className="space-y-2">
                 <label className="text-xs font-bold uppercase text-muted-foreground invisible">Actions</label>
-                <Popover open={addItemOpen} onOpenChange={setAddItemOpen}>
-                  <PopoverTrigger asChild>
-                    <Button variant="outline" size="sm" disabled={removedItems.length === 0} className="w-full h-10 px-4 text-xs font-bold text-primary border-primary hover:bg-primary/10 transition-all flex items-center justify-center gap-2">
+                <Dialog open={addItemOpen} onOpenChange={setAddItemOpen}>
+                  <DialogTrigger asChild>
+                    <Button variant="outline" size="sm" className="w-full h-10 px-4 text-xs font-bold text-primary border-primary hover:bg-primary/10 transition-all flex items-center justify-center gap-2">
                       <Plus className="h-4 w-4" /> Add Item
                     </Button>
-                  </PopoverTrigger>
-                  <PopoverContent className="p-0 w-64" align="start">
-                    <Command>
-                      <CommandInput placeholder="Search removed items..." />
-                      <CommandList className="max-h-[220px]">
-                        <CommandEmpty>No removed items to add back.</CommandEmpty>
-                        <CommandGroup>
+                  </DialogTrigger>
+                  <DialogContent className="max-w-3xl max-h-[80vh] flex flex-col">
+                    <DialogHeader><DialogTitle className="text-xl font-bold">Add Items</DialogTitle></DialogHeader>
+
+                    {removedItems.length > 0 && (
+                      <div className="rounded-lg border bg-muted/20 p-3 space-y-2">
+                        <p className="text-[10px] font-black uppercase text-muted-foreground tracking-wider">Removed from this list — tap to restore</p>
+                        <div className="flex flex-wrap gap-2">
                           {removedItems.map((it) => (
-                            <CommandItem key={it.index} value={it.title || it.description || String(it.index)} onSelect={() => addBackItem(it.index)}>
-                              <Plus className="mr-2 h-3.5 w-3.5 text-primary" />
-                              {it.title || it.description || "Untitled item"}
-                            </CommandItem>
+                            <button
+                              key={it.index}
+                              type="button"
+                              onClick={() => addBackItem(it.index)}
+                              className="text-xs font-bold px-3 py-1.5 rounded-full border border-primary/30 text-primary bg-white hover:bg-primary/10 transition-colors flex items-center gap-1.5"
+                            >
+                              <Plus className="h-3 w-3" /> {it.title || it.description || "Untitled item"}
+                            </button>
                           ))}
-                        </CommandGroup>
-                      </CommandList>
-                    </Command>
-                  </PopoverContent>
-                </Popover>
+                        </div>
+                      </div>
+                    )}
+
+                    <div className="relative mt-1">
+                      <Search className="absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
+                      <Input placeholder="Search materials by name or code..." className="pl-10 h-10" value={materialSearch} onChange={(e) => setMaterialSearch(e.target.value)} />
+                    </div>
+                    <div className="overflow-y-auto border rounded-xl flex-1">
+                      <Table>
+                        <TableHeader className="bg-muted/50 sticky top-0 z-10">
+                          <TableRow>
+                            <TableHead className="font-bold">Material Name</TableHead>
+                            <TableHead className="font-bold">Unit</TableHead>
+                            <TableHead className="font-bold">Shop</TableHead>
+                            <TableHead className="font-bold">Rate</TableHead>
+                            <TableHead className="text-right font-bold pr-6">Action</TableHead>
+                          </TableRow>
+                        </TableHeader>
+                        <TableBody>
+                          {loadingMaterials ? (
+                            <TableRow><TableCell colSpan={5} className="text-center py-10"><Loader2 className="h-6 w-6 animate-spin mx-auto text-primary" /></TableCell></TableRow>
+                          ) : uniqueMaterials.filter((m: any) => fuzzySearch(materialSearch, [m.name || "", m.code || ""])).length === 0 ? (
+                            <TableRow><TableCell colSpan={5} className="text-center py-10 text-muted-foreground italic">No materials found.</TableCell></TableRow>
+                          ) : uniqueMaterials.filter((m: any) => fuzzySearch(materialSearch, [m.name || "", m.code || ""])).map((material: any) => {
+                            const alreadyAdded = allItems.some((it) => it.id && it.id === material.id && configByIndex[it.index]?.selected);
+                            return (
+                              <TableRow key={material.id} className="hover:bg-muted/10">
+                                <TableCell className="font-medium">
+                                  <div className="flex items-center gap-2">
+                                    <span>{material.name}</span>
+                                    {material.is_project_pricing && (
+                                      <Badge className="bg-amber-500 hover:bg-amber-600 text-white text-[9px] px-1.5 py-0 h-4 uppercase tracking-wider">Project Pricing</Badge>
+                                    )}
+                                  </div>
+                                  <div className="text-[10px] text-muted-foreground">Code: {material.code || material.id}</div>
+                                </TableCell>
+                                <TableCell>{material.unit || "-"}</TableCell>
+                                <TableCell>{material.shop_name || "-"}</TableCell>
+                                <TableCell className="font-bold text-[13px]">₹{Number(material.rate || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</TableCell>
+                                <TableCell className="text-right pr-4">
+                                  <Button
+                                    size="sm"
+                                    variant="outline"
+                                    disabled={alreadyAdded}
+                                    className="h-8 text-xs font-bold border-primary text-primary hover:bg-primary hover:text-white disabled:opacity-50"
+                                    onClick={() => addNewMaterial(material)}
+                                  >
+                                    {alreadyAdded ? "Added" : "Add"}
+                                  </Button>
+                                </TableCell>
+                              </TableRow>
+                            );
+                          })}
+                        </TableBody>
+                      </Table>
+                    </div>
+                  </DialogContent>
+                </Dialog>
               </div>
             </div>
 

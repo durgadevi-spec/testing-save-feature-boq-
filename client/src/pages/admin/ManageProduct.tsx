@@ -2087,12 +2087,13 @@ export default function ManageProduct() {
                                                                     <TableHead className="font-bold">Material Name</TableHead>
                                                                     <TableHead className="font-bold">Unit</TableHead>
                                                                     <TableHead className="font-bold">Shop</TableHead>
+                                                                    <TableHead className="font-bold">Rate</TableHead>
                                                                     <TableHead className="text-right font-bold pr-6">Action</TableHead>
                                                                 </TableRow>
                                                             </TableHeader>
                                                             <TableBody>
                                                                 {loadingMaterials ? (
-                                                                    <TableRow><TableCell colSpan={4} className="text-center py-10"><Loader2 className="h-6 w-6 animate-spin mx-auto text-primary" /></TableCell></TableRow>
+                                                                    <TableRow><TableCell colSpan={5} className="text-center py-10"><Loader2 className="h-6 w-6 animate-spin mx-auto text-primary" /></TableCell></TableRow>
                                                                 ) : (uniqueMaterials || []).filter(m => {
                                                                     return fuzzySearch(step3MaterialSearch, [m.name || "", m.code || ""]);
                                                                 }).map(material => (
@@ -2110,6 +2111,7 @@ export default function ManageProduct() {
                                                                         </TableCell>
                                                                         <TableCell>{material.unit || "-"}</TableCell>
                                                                         <TableCell>{material.shop_name || "-"}</TableCell>
+                                                                        <TableCell className="font-bold text-[13px]">₹{Number(material.rate || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</TableCell>
                                                                         <TableCell className="text-right pr-4">
                                                                             <Button size="sm" variant="outline" className="h-8 text-xs font-bold border-primary text-primary hover:bg-primary hover:text-white"
                                                                                 onClick={() => {

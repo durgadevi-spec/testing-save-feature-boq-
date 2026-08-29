@@ -163,41 +163,41 @@ export default function NewItemsApprovalTab({ canAct }: { canAct: boolean }) {
 
         const globalProductItemsRaw = asArray((r as any).global_product_items);
         const globalProductItems = globalProductItemsRaw.map((it: any, i: number) => ({
-           id: it.material_id || `global-${i}`,
-           title: it.material_name,
-           description: it.material_name,
-           unit: it.unit,
-           qty: it.qty,
-           qtyPerSqf: it.qty,
-           supply_rate: it.supply_rate,
-           install_rate: it.install_rate,
-           location: it.location,
-           freezeAndEdit: it.freeze_and_edit,
-           shop_name: ""
+          id: it.material_id || `global-${i}`,
+          title: it.material_name,
+          description: it.material_name,
+          unit: it.unit,
+          qty: it.qty,
+          qtyPerSqf: it.qty,
+          supply_rate: it.supply_rate,
+          install_rate: it.install_rate,
+          location: it.location,
+          freezeAndEdit: it.freeze_and_edit,
+          shop_name: ""
         }));
 
         let mergedItems = [...newItems];
         if (r.type === "save") {
-           mergedItems = [...globalProductItems];
-           if (r.status !== 'approved') {
-               // Append them if they aren't in the global product yet (pending or rejected)
-               const taggedNewItems = newItems.map((it: any) => ({
-                 ...it,
-                 manualApproval: { requestId: r.id, status: r.status }
-               }));
-               mergedItems.push(...taggedNewItems);
-           } else {
-               // If approved, they are already inserted into globalProductItems by the backend.
-               // We just need to identify and highlight them by matching names.
-               const newNames = new Set(newItems.map((ni: any) => (ni.title || ni.description || ni.material_name || "").toLowerCase().trim()));
-               mergedItems = mergedItems.map((it: any) => {
-                  const title = (it.title || it.description || it.material_name || "").toLowerCase().trim();
-                  if (newNames.has(title)) {
-                      return { ...it, manualApproval: { requestId: r.id, status: r.status } };
-                  }
-                  return it;
-               });
-           }
+          mergedItems = [...globalProductItems];
+          if (r.status !== 'approved') {
+            // Append them if they aren't in the global product yet (pending or rejected)
+            const taggedNewItems = newItems.map((it: any) => ({
+              ...it,
+              manualApproval: { requestId: r.id, status: r.status }
+            }));
+            mergedItems.push(...taggedNewItems);
+          } else {
+            // If approved, they are already inserted into globalProductItems by the backend.
+            // We just need to identify and highlight them by matching names.
+            const newNames = new Set(newItems.map((ni: any) => (ni.title || ni.description || ni.material_name || "").toLowerCase().trim()));
+            mergedItems = mergedItems.map((it: any) => {
+              const title = (it.title || it.description || it.material_name || "").toLowerCase().trim();
+              if (newNames.has(title)) {
+                return { ...it, manualApproval: { requestId: r.id, status: r.status } };
+              }
+              return it;
+            });
+          }
         }
 
         const items: any[] = r.type === "save" ? mergedItems : newItems;
@@ -220,7 +220,7 @@ export default function NewItemsApprovalTab({ canAct }: { canAct: boolean }) {
           id: it.material_id || it.title || `item-${it.index}`,
           name: it.title || it.description || "Untitled",
           unit: it.unit || "-",
-          location: it.location || "Main Area",
+          location: it.location || it.description || "Main Area",
           baseQty: Number(it.qtyPerSqf ?? it.qty ?? 0),
           wastagePct: it.wastagePct !== undefined ? Number(it.wastagePct) : undefined,
           supplyRate: Number(it.supply_rate ?? 0),
@@ -313,6 +313,13 @@ export default function NewItemsApprovalTab({ canAct }: { canAct: boolean }) {
                     )}
                   </div>
 
+                  {productConfig.description && (
+                    <div className="bg-white rounded-lg border p-3">
+                      <p className="text-[10px] uppercase font-bold text-muted-foreground mb-1">Description</p>
+                      <p className="text-sm">{productConfig.description}</p>
+                    </div>
+                  )}
+
                   {/* Items Table — matches ProductApprovals detail table */}
                   <div className="rounded-lg border overflow-hidden bg-white">
                     <Table>
@@ -321,6 +328,7 @@ export default function NewItemsApprovalTab({ canAct }: { canAct: boolean }) {
                           <TableHead className="w-[40px] font-bold">Sl</TableHead>
                           {usingFullProductView && <TableHead className="w-[70px] font-bold">Status</TableHead>}
                           <TableHead className="font-bold py-4">Item</TableHead>
+                          <TableHead className="w-[120px] font-bold">Description</TableHead>
                           <TableHead className="w-[60px] font-bold">Unit</TableHead>
                           <TableHead className="w-[100px] font-bold">Qty</TableHead>
                           <TableHead className="w-[100px] font-bold">Supply Rate</TableHead>
@@ -372,6 +380,7 @@ export default function NewItemsApprovalTab({ canAct }: { canAct: boolean }) {
                                 </TableCell>
                               )}
                               <TableCell className="font-semibold">{it.title || it.description}</TableCell>
+                              <TableCell className="text-[10px] text-muted-foreground">{it.location || it.description || "-"}</TableCell>
                               <TableCell className="text-[10px] font-medium">{it.unit || "-"}</TableCell>
                               <TableCell className="text-[11px] font-bold text-center">{baseQty}</TableCell>
                               <TableCell className="text-[10px] font-bold">₹{supplyRate.toLocaleString()}</TableCell>
@@ -388,7 +397,7 @@ export default function NewItemsApprovalTab({ canAct }: { canAct: boolean }) {
                         {/* Grand Total Row — sums whatever is currently shown (full
                             product when merged view is active, submitted items otherwise) */}
                         <TableRow className="bg-muted/20 font-black">
-                          <TableCell colSpan={usingFullProductView ? 7 : 6} className="text-right py-3 pr-4">Total (Incl. Wastage)</TableCell>
+                          <TableCell colSpan={usingFullProductView ? 8 : 7} className="text-right py-3 pr-4">Total (Incl. Wastage)</TableCell>
                           <TableCell className="text-[11px] font-bold">
                             ₹{items.reduce((sum: number, it: any) => {
                               const rate = Number(it.supply_rate ?? 0) + Number(it.install_rate ?? 0);
