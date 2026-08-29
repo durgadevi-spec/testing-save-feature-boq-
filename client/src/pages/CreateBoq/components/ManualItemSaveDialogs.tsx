@@ -4,10 +4,13 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from "@/components/ui/command";
-import { Loader2, ArrowLeft, ArrowRight, GripVertical, ChevronsUpDown, Check } from "lucide-react";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
+import { Loader2, ArrowLeft, ArrowRight, GripVertical, ChevronsUpDown, Check, Layers, Maximize2, Minimize2, Plus } from "lucide-react";
 import { computeBoq } from "@/lib/boqCalc";
 import apiFetch from "@/lib/api";
 
@@ -122,6 +125,12 @@ export function SaveConfirmDialog({
 }
 
 // ── Save As wizard dialog ───────────────────────────────────────────────
+// Step 1: Product Name / Category / Subcategory (unchanged).
+// Step 2: "Configuration" — a full-screen dialog that mirrors the Manage
+// Product configuration screen (description, dims, item table with
+// per-item wastage / round-off, live totals) so item details — including
+// the product description — are captured and submitted exactly the same
+// way Manage Product does it.
 
 type ItemConfig = {
   selected: boolean;
@@ -130,6 +139,9 @@ type ItemConfig = {
   supplyRate: number;
   installRate: number;
   freezeAndEdit: boolean;
+  applyWastage: boolean;
+  applyRounding: boolean;
+  description: string;
 };
 
 export function SaveAsWizardDialog({
@@ -147,9 +159,9 @@ export function SaveAsWizardDialog({
   items: PendingManualItem[];
   isSubmitting: boolean;
   existingProductNames: string[];
-  onSubmit: (payload: { newProductName: string; selectedIndexes: number[]; items: any[]; calculatedResults: any }) => void;
+  onSubmit: (payload: { newProductName: string; selectedIndexes: number[]; items: any[]; calculatedResults: any; productConfig?: any; description?: string }) => void;
 }) {
-  const [step, setStep] = useState<1 | 2 | 3 | 4>(1);
+  const [step, setStep] = useState<1 | 2>(1);
   const [newProductName, setNewProductName] = useState("");
   const [nameError, setNameError] = useState("");
   const [configByIndex, setConfigByIndex] = useState<Record<number, ItemConfig>>({});
@@ -166,6 +178,13 @@ export function SaveAsWizardDialog({
   const [subcategoryOpen, setSubcategoryOpen] = useState(false);
   const [categorySearch, setCategorySearch] = useState("");
   const [subcategorySearch, setSubcategorySearch] = useState("");
+
+  // ── Product description (Configuration step — must be saved) ──
+  const [productDescription, setProductDescription] = useState("");
+
+  // ── Full-screen toggle for the Configuration step ──
+  const [isMaximized, setIsMaximized] = useState(true);
+  const [isCompactView, setIsCompactView] = useState(false);
 
   // Load the same category list used elsewhere in the app (Manage Product, etc.)
   useEffect(() => {
@@ -210,10 +229,12 @@ export function SaveAsWizardDialog({
   const [dimC, setDimC] = useState<number | undefined>();
   const [requiredUnitType, setRequiredUnitType] = useState("Sqft");
   const [baseRequiredQty, setBaseRequiredQty] = useState(1);
+  const [wastagePctDefault, setWastagePctDefault] = useState(0);
 
   const [bulkSelected, setBulkSelected] = useState<Set<number>>(new Set());
   const [bulkQty, setBulkQty] = useState<string>("");
   const [bulkWastage, setBulkWastage] = useState<string>("");
+  const [addItemOpen, setAddItemOpen] = useState(false);
 
   const applyBulkEdit = () => {
     if (bulkSelected.size === 0) return;
@@ -243,7 +264,7 @@ export function SaveAsWizardDialog({
   useEffect(() => {
     // Only reset when the dialog first opens (open transitions false → true).
     // This prevents parent re-renders (which create new `items` refs) from
-    // resetting the wizard back to step 1 while the user is on step 2/3/4.
+    // resetting the wizard back to step 1 while the user is on step 2.
     if (!open) { prevOpenRef.current = false; return; }
     if (prevOpenRef.current) return;          // already open — skip reset
     prevOpenRef.current = true;
@@ -253,11 +274,15 @@ export function SaveAsWizardDialog({
     setCategory("");
     setSubcategory("");
     setCategoryError("");
+    setProductDescription("");
     setDimA(undefined);
     setDimB(undefined);
     setDimC(undefined);
     setRequiredUnitType("Sqft");
     setBaseRequiredQty(1);
+    setWastagePctDefault(0);
+    setIsMaximized(true);
+    setIsCompactView(false);
     setBulkSelected(new Set());
     setBulkQty("");
     setBulkWastage("");
@@ -273,39 +298,63 @@ export function SaveAsWizardDialog({
         supplyRate: Number(it.supply_rate ?? (it as any).supplyRate ?? 0) || 0,
         installRate: Number(it.install_rate ?? (it as any).installRate ?? 0) || 0,
         freezeAndEdit: !!(it.freezeAndEdit || (it as any).freeze_and_edit),
+        applyWastage: (it as any).applyWastage !== false,
+        applyRounding: (it as any).applyRounding !== false,
+        description: it.description || it.title || "",
       };
     });
     setConfigByIndex(initial);
   }, [open, items]);
 
   const selectedItems = useMemo(() => items.filter((it) => configByIndex[it.index]?.selected), [items, configByIndex]);
+  const removedItems = useMemo(() => items.filter((it) => configByIndex[it.index] && !configByIndex[it.index]?.selected), [items, configByIndex]);
 
-  // Reuse the existing calculation engine (client/src/lib/boqCalc.ts)
-  const computedResults = useMemo(() => {
-    return selectedItems.map((it) => {
+  // Reuse the existing calculation engine (client/src/lib/boqCalc.ts) — a single
+  // call over every included line, same as Manage Product, so totals / rate-per-unit
+  // and per-line wastage & round-off math match exactly.
+  const boqResult = useMemo(() => {
+    const lines = selectedItems.map((it) => {
       const cfg = configByIndex[it.index];
-      const qty = Number(cfg?.qty) || 0;
-      const result = computeBoq(
-        { requiredUnitType: requiredUnitType, baseRequiredQty: baseRequiredQty, wastagePctDefault: cfg?.wastagePct || 0 },
-        [{
-          name: it.title,
-          unit: it.unit,
-          baseQty: qty,
-          supplyRate: Number(cfg?.supplyRate) || 0,
-          installRate: Number(cfg?.installRate) || 0,
-          freezeAndEdit: cfg?.freezeAndEdit,
-        }],
-        baseRequiredQty
-      );
-      const line = result.computed[0];
-      return { item: it, cfg, line };
+      return {
+        _index: it.index,
+        id: it.id,
+        name: it.title || it.description,
+        unit: it.unit,
+        location: it.shop_name || "Main Area",
+        shop_name: it.shop_name,
+        shop_id: it.shop_id,
+        description: cfg?.description || it.description || it.title,
+        baseQty: Number(cfg?.qty) || 0,
+        wastagePct: cfg?.wastagePct,
+        supplyRate: Number(cfg?.supplyRate) || 0,
+        installRate: Number(cfg?.installRate) || 0,
+        applyWastage: cfg?.applyWastage !== false,
+        applyRounding: cfg?.applyRounding !== false,
+        freezeAndEdit: cfg?.freezeAndEdit,
+      };
     });
-  }, [selectedItems, configByIndex, requiredUnitType, baseRequiredQty]);
+    return computeBoq({ requiredUnitType, baseRequiredQty, wastagePctDefault }, lines, baseRequiredQty);
+  }, [selectedItems, configByIndex, requiredUnitType, baseRequiredQty, wastagePctDefault]);
 
-  const grandTotal = computedResults.reduce((s, r) => s + (r.line?.lineTotal || 0), 0);
+  const computedResults = useMemo(
+    () => selectedItems.map((it) => ({
+      item: it,
+      cfg: configByIndex[it.index],
+      line: boqResult.computed.find((c: any) => c._index === it.index),
+    })),
+    [selectedItems, configByIndex, boqResult]
+  );
+
+  const grandTotal = boqResult.grandTotal;
 
   const updateConfig = (index: number, patch: Partial<ItemConfig>) => {
     setConfigByIndex((prev) => ({ ...prev, [index]: { ...prev[index], ...patch } }));
+  };
+
+  const removeItem = (index: number) => updateConfig(index, { selected: false });
+  const addBackItem = (index: number) => {
+    updateConfig(index, { selected: true });
+    setAddItemOpen(false);
   };
 
   const goNext = () => {
@@ -320,35 +369,36 @@ export function SaveAsWizardDialog({
       if (!category) { setCategoryError("Category is required"); return; }
       setCategoryError("");
     }
-    if (step === 2 && selectedItems.length === 0) return;
-    setStep((s) => (Math.min(4, s + 1) as 1 | 2 | 3 | 4));
+    setStep((s) => (Math.min(2, s + 1) as 1 | 2));
   };
-  const goBack = () => setStep((s) => (Math.max(1, s - 1) as 1 | 2 | 3 | 4));
+  const goBack = () => setStep((s) => (Math.max(1, s - 1) as 1 | 2));
 
   const handleSubmit = () => {
+    if (selectedItems.length === 0) return;
     const payload = {
       newProductName: newProductName.trim(),
       selectedIndexes: selectedItems.map((it) => it.index),
+      description: productDescription,
       items: computedResults.map(({ item, cfg, line }) => ({
         // Identity
         id: item.id || item.materialId,
         materialId: item.materialId || item.id,
         title: item.title || item.description,
         name: item.title || item.description,
-        description: item.description || item.title,
+        description: cfg.description || item.description || item.title,
         unit: item.unit,
         shop_name: item.shop_name,
         shop_id: item.shop_id,
         category: item.category,
-        // Per-unit qty (the qty-per-base-unit configured in step 3)
+        // Per-unit qty (the qty-per-base-unit configured in the Configuration step)
         qty: cfg.qty,
         qtyPerSqf: cfg.qty,
         baseQty: cfg.qty,
-        // Wastage & freeze settings
+        // Wastage & round-off / freeze settings
         wastagePct: cfg.wastagePct,
         freezeAndEdit: cfg.freezeAndEdit,
-        applyWastage: true,
-        applyRounding: true,
+        applyWastage: cfg.applyWastage,
+        applyRounding: cfg.applyRounding,
         // Rates
         supply_rate: cfg.supplyRate,
         install_rate: cfg.installRate,
@@ -357,12 +407,14 @@ export function SaveAsWizardDialog({
         // Pre-computed amounts (for display / fallback)
         requiredQty: line?.roundOffQty ?? cfg.qty,
         roundOff: line?.roundOffQty ?? cfg.qty,
+        wastageQty: line?.wastageQty ?? 0,
         amount: line?.lineTotal ?? 0,
       })),
       calculatedResults: {
-        totalSupply: computedResults.reduce((s, r) => s + (r.line?.supplyAmount || 0), 0),
-        totalInstall: computedResults.reduce((s, r) => s + (r.line?.installAmount || 0), 0),
+        totalSupply: boqResult.totalSupply,
+        totalInstall: boqResult.totalInstall,
         grandTotal,
+        ratePerUnit: boqResult.ratePerUnit,
       },
       productConfig: {
         dimA,
@@ -370,29 +422,78 @@ export function SaveAsWizardDialog({
         dimC,
         requiredUnitType,
         baseRequiredQty,
+        wastagePctDefault,
         category,
         subcategory,
+        description: productDescription,
       }
     };
     onSubmit(payload);
   };
 
-  const stepLabels = ["Product Name", "Select Items", "Calculation", "Review"];
+  const stepLabels = ["Product Name", "Configuration"];
 
   const wizardDialogRef = useRef<HTMLDivElement>(null);
+
+  const dialogSizeClass = step === 1
+    ? "w-[90vw] max-w-4xl max-h-[90vh]"
+    : isMaximized
+      ? "w-screen h-screen max-w-none max-h-none rounded-none"
+      : "w-[96vw] max-w-[1400px] h-[92vh] max-h-[92vh]";
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent ref={wizardDialogRef} className="w-[90vw] max-w-4xl max-h-[90vh] overflow-hidden flex flex-col border-4 border-slate-200 shadow-2xl p-4 sm:p-6">
-        <DialogHeader>
-          <DialogTitle className="text-2xl font-black text-slate-800">
-            {newProductName.trim() ? newProductName.trim() : "Save As New Product"}
-          </DialogTitle>
-          <DialogDescription className="text-base">
-            Source Product: <span className="font-bold text-primary">{sourceProductName}</span>
-          </DialogDescription>
-        </DialogHeader>
+      <DialogContent ref={wizardDialogRef} className={`${dialogSizeClass} overflow-hidden flex flex-col border-4 border-slate-200 shadow-2xl p-4 sm:p-6 transition-all`}>
+        {step === 1 && (
+          <DialogHeader>
+            <DialogTitle className="text-2xl font-black text-slate-800">
+              {newProductName.trim() ? newProductName.trim() : "Save As New Product"}
+            </DialogTitle>
+            <DialogDescription className="text-base">
+              Source Product: <span className="font-bold text-primary">{sourceProductName}</span>
+            </DialogDescription>
+          </DialogHeader>
+        )}
 
-        <div className="flex items-center gap-2 text-sm font-bold text-slate-400 mb-2">
+        {step === 2 && (
+          <div className="flex flex-col md:flex-row items-center justify-between gap-6 bg-gradient-to-r from-primary/10 via-primary/5 to-transparent p-6 rounded-2xl border-2 border-primary/10 shadow-sm shrink-0">
+            <div className="flex items-center gap-4">
+              <div className="h-12 w-12 rounded-xl bg-primary flex items-center justify-center text-white shadow-lg shadow-primary/20">
+                <Layers className="h-6 w-6" />
+              </div>
+              <div>
+                <h3 className="text-xs font-bold text-muted-foreground uppercase tracking-widest mb-1">Configuration For</h3>
+                <p className="text-2xl font-extrabold text-slate-900">{newProductName || "New Product"}</p>
+              </div>
+            </div>
+            <div className="flex flex-col md:flex-row items-center md:items-end gap-8">
+              <div className="flex items-center gap-3 bg-white px-3 py-1.5 rounded-lg border shadow-sm">
+                <span className="text-[10px] font-black text-muted-foreground uppercase tracking-tighter">Compact View</span>
+                <Checkbox checked={isCompactView} onCheckedChange={(val) => setIsCompactView(!!val)} />
+              </div>
+              <div className="text-center md:text-right">
+                <h3 className="text-[10px] font-black text-muted-foreground uppercase tracking-widest mb-1">Total Cost (for {baseRequiredQty} {requiredUnitType})</h3>
+                <p className="text-3xl font-black text-slate-900">₹{grandTotal.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
+              </div>
+              <div className="text-center md:text-right bg-primary/5 px-6 py-3 rounded-xl border border-primary/20">
+                <h3 className="text-[10px] font-black text-primary uppercase tracking-widest mb-1">Final Rate per {requiredUnitType}</h3>
+                <p className="text-4xl font-black text-primary">₹{boqResult.ratePerUnit.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
+              </div>
+              <Button
+                type="button"
+                variant="outline"
+                size="icon"
+                className="h-9 w-9 shrink-0"
+                title={isMaximized ? "Restore" : "Full screen"}
+                onClick={() => setIsMaximized((v) => !v)}
+              >
+                {isMaximized ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
+              </Button>
+            </div>
+          </div>
+        )}
+
+        <div className="flex items-center gap-2 text-sm font-bold text-slate-400 mb-2 shrink-0">
           {stepLabels.map((label, i) => (
             <React.Fragment key={label}>
               <span className={i + 1 === step ? "text-primary" : i + 1 < step ? "text-slate-600" : ""}>{i + 1}. {label}</span>
@@ -503,71 +604,95 @@ export function SaveAsWizardDialog({
         )}
 
         {step === 2 && (
-          <div className="space-y-3 mt-4 flex flex-col flex-1 min-h-0">
-            <p className="text-base text-slate-500 font-medium">Choose which newly added manual items go into <span className="font-bold text-slate-800">{newProductName}</span>.</p>
-            <div className="rounded-xl border-2 border-slate-200 divide-y flex-1 overflow-y-auto bg-white shadow-inner min-h-0">
-              {items.map((it) => (
-                <label key={it.index} className="flex items-center gap-4 px-4 py-3 text-base cursor-pointer hover:bg-slate-50 transition-colors">
-                  <Checkbox
-                    className="h-5 w-5 border-2"
-                    checked={!!configByIndex[it.index]?.selected}
-                    onCheckedChange={(v) => updateConfig(it.index, { selected: !!v })}
-                  />
-                  <span className="font-bold text-slate-700 flex-1">{it.title || it.description}</span>
-                  <span className="text-slate-400 text-sm font-semibold">{it.unit}</span>
-                </label>
-              ))}
+          <div className="space-y-6 mt-1 flex flex-col flex-1 min-h-0 overflow-y-auto pr-1">
+            <div className="grid grid-cols-1 md:grid-cols-6 gap-4 p-6 bg-white rounded-xl border shadow-sm items-end">
+              <div className="space-y-2">
+                <label className="text-xs font-bold uppercase text-muted-foreground">Unit Type</label>
+                <Select value={requiredUnitType} onValueChange={(v) => setRequiredUnitType(v)}>
+                  <SelectTrigger className="font-bold"><SelectValue placeholder="Select unit" /></SelectTrigger>
+                  <SelectContent className="max-h-[300px] overflow-y-auto">
+                    <SelectItem value="Sqft">Sqft</SelectItem>
+                    <SelectItem value="Rft">Rft</SelectItem>
+                    <SelectItem value="Pcs">Pcs</SelectItem>
+                    <SelectItem value="Nos">Nos</SelectItem>
+                    <SelectItem value="Rmt">Rmt</SelectItem>
+                    <SelectItem value="Cum">Cum</SelectItem>
+                    <SelectItem value="Ltrs">Ltrs</SelectItem>
+                    <SelectItem value="Kgs">Kgs</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="md:col-span-5 space-y-2">
+                <label className="text-xs font-bold uppercase text-muted-foreground">Product Description</label>
+                <Textarea placeholder="Enter a description..." value={productDescription} onChange={(e) => setProductDescription(e.target.value)} className="min-h-[80px] font-medium" />
+              </div>
+
+              <div className="space-y-2">
+                <label className="text-xs font-bold uppercase text-muted-foreground">Dim A</label>
+                <Input type="number" value={dimA ?? ""} onChange={(e) => setDimA(e.target.value ? Number(e.target.value) : undefined)} placeholder="A" className="font-bold" />
+              </div>
+              <div className="space-y-2">
+                <label className="text-xs font-bold uppercase text-muted-foreground">Dim B</label>
+                <Input type="number" value={dimB ?? ""} onChange={(e) => setDimB(e.target.value ? Number(e.target.value) : undefined)} placeholder="B" className="font-bold" />
+              </div>
+              <div className="space-y-2">
+                <label className="text-xs font-bold uppercase text-muted-foreground">Dim C</label>
+                <Input type="number" value={dimC ?? ""} onChange={(e) => setDimC(e.target.value ? Number(e.target.value) : undefined)} placeholder="C" className="font-bold" />
+              </div>
+              <div className="space-y-2">
+                <label className="text-xs font-bold uppercase text-muted-foreground">Basis Qty</label>
+                <Input type="number" value={baseRequiredQty} onChange={(e) => setBaseRequiredQty(Number(e.target.value) || 0)} className="font-bold bg-muted/30" />
+              </div>
+              <div className="space-y-2">
+                <label className="text-xs font-bold uppercase text-muted-foreground">Wastage %</label>
+                <Input
+                  type="number"
+                  value={wastagePctDefault}
+                  onChange={(e) => {
+                    const v = Number(e.target.value) || 0;
+                    setWastagePctDefault(v);
+                    setConfigByIndex((prev) => {
+                      const next = { ...prev };
+                      selectedItems.forEach((it) => { if (next[it.index]?.applyWastage) next[it.index] = { ...next[it.index], wastagePct: v }; });
+                      return next;
+                    });
+                  }}
+                  className="font-bold border-orange-200"
+                />
+              </div>
+              <div className="space-y-2">
+                <label className="text-xs font-bold uppercase text-muted-foreground invisible">Actions</label>
+                <Popover open={addItemOpen} onOpenChange={setAddItemOpen}>
+                  <PopoverTrigger asChild>
+                    <Button variant="outline" size="sm" disabled={removedItems.length === 0} className="w-full h-10 px-4 text-xs font-bold text-primary border-primary hover:bg-primary/10 transition-all flex items-center justify-center gap-2">
+                      <Plus className="h-4 w-4" /> Add Item
+                    </Button>
+                  </PopoverTrigger>
+                  <PopoverContent className="p-0 w-64" align="start">
+                    <Command>
+                      <CommandInput placeholder="Search removed items..." />
+                      <CommandList className="max-h-[220px]">
+                        <CommandEmpty>No removed items to add back.</CommandEmpty>
+                        <CommandGroup>
+                          {removedItems.map((it) => (
+                            <CommandItem key={it.index} value={it.title || it.description || String(it.index)} onSelect={() => addBackItem(it.index)}>
+                              <Plus className="mr-2 h-3.5 w-3.5 text-primary" />
+                              {it.title || it.description || "Untitled item"}
+                            </CommandItem>
+                          ))}
+                        </CommandGroup>
+                      </CommandList>
+                    </Command>
+                  </PopoverContent>
+                </Popover>
+              </div>
             </div>
-            {selectedItems.length === 0 && <p className="text-sm text-red-600 font-bold">Select at least one item.</p>}
-          </div>
-        )}
 
-        {step === 3 && (
-          <div className="space-y-2 mt-1 flex flex-col flex-1 min-h-0">
-            <p className="text-sm text-slate-500 font-medium">Configure product dimensions and item quantities — same calculation logic as Manage Product.</p>
-
-            {/* Product-level configuration and Bulk Edit Tools */}
-            <div className="rounded-xl border-2 border-indigo-100 bg-indigo-50/50 p-2 px-3 shadow-sm flex flex-col lg:flex-row items-start lg:items-center gap-4">
-              <p className="text-[10px] font-black uppercase text-indigo-400 tracking-wider w-16 shrink-0 leading-tight hidden lg:block">Product Config</p>
-              <div className="flex flex-wrap items-center gap-4 flex-1">
-                <div className="w-24">
-                  <Label className="text-[10px] font-bold uppercase text-slate-500">Unit</Label>
-                  <Select value={requiredUnitType} onValueChange={(v) => setRequiredUnitType(v)}>
-                    <SelectTrigger className="h-7 text-xs font-bold border-2 border-slate-200 px-2 rounded-md">
-                      <SelectValue placeholder="Sqft" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="Sqft">Sqft</SelectItem>
-                      <SelectItem value="Rft">Rft</SelectItem>
-                      <SelectItem value="Pcs">Pcs</SelectItem>
-                      <SelectItem value="Nos">Nos</SelectItem>
-                      <SelectItem value="Rmt">Rmt</SelectItem>
-                      <SelectItem value="Cum">Cum</SelectItem>
-                      <SelectItem value="Ltrs">Ltrs</SelectItem>
-                      <SelectItem value="Kgs">Kgs</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div className="w-16">
-                  <Label className="text-[10px] font-bold uppercase text-slate-500">Dim A</Label>
-                  <Input type="number" className="h-7 text-xs font-bold border-2 border-slate-200 px-2" value={dimA ?? ""} onChange={(e) => setDimA(e.target.value ? Number(e.target.value) : undefined)} placeholder="A" />
-                </div>
-                <div className="w-16">
-                  <Label className="text-[10px] font-bold uppercase text-slate-500">Dim B</Label>
-                  <Input type="number" className="h-7 text-xs font-bold border-2 border-slate-200 px-2" value={dimB ?? ""} onChange={(e) => setDimB(e.target.value ? Number(e.target.value) : undefined)} placeholder="B" />
-                </div>
-                <div className="w-16">
-                  <Label className="text-[10px] font-bold uppercase text-slate-500">Dim C</Label>
-                  <Input type="number" className="h-7 text-xs font-bold border-2 border-slate-200 px-2" value={dimC ?? ""} onChange={(e) => setDimC(e.target.value ? Number(e.target.value) : undefined)} placeholder="C" />
-                </div>
-                <div className="w-20">
-                  <Label className="text-[10px] font-bold uppercase text-indigo-500">Req Qty</Label>
-                  <Input type="number" className="h-7 text-xs font-black bg-white border-2 border-indigo-200 text-indigo-700 px-2" value={baseRequiredQty} onChange={(e) => setBaseRequiredQty(Number(e.target.value) || 1)} />
-                </div>
-
-                <div className="h-8 w-px bg-indigo-200 mx-1 hidden sm:block"></div>
-
-                <div className="flex items-center gap-3">
+            {/* Bulk edit tools (additive — not present in Manage Product, kept for faster multi-row edits) */}
+            {selectedItems.length > 0 && (
+              <div className="rounded-xl border-2 border-indigo-100 bg-indigo-50/50 p-2 px-3 shadow-sm flex flex-col lg:flex-row items-start lg:items-center gap-4">
+                <p className="text-[10px] font-black uppercase text-indigo-400 tracking-wider w-24 shrink-0 leading-tight hidden lg:block">Bulk Edit</p>
+                <div className="flex flex-wrap items-center gap-3">
                   <label className="flex items-center gap-2 text-xs font-bold text-indigo-700 cursor-pointer">
                     <Checkbox
                       className="border-indigo-400 data-[state=checked]:bg-indigo-600 data-[state=checked]:border-indigo-600"
@@ -586,9 +711,9 @@ export function SaveAsWizardDialog({
                     <>
                       <div className="h-4 w-px bg-indigo-200 mx-1"></div>
                       <div className="flex items-center gap-2 animate-in fade-in slide-in-from-left-2 duration-200">
-                        <Input type="number" placeholder="Set Qty" className="h-7 w-20 text-xs font-bold bg-white border-2 border-indigo-200" value={bulkQty} onChange={e => setBulkQty(e.target.value)} />
-                        <Input type="number" placeholder="Set Wastage %" className="h-7 w-28 text-xs font-bold bg-white border-2 border-indigo-200" value={bulkWastage} onChange={e => setBulkWastage(e.target.value)} />
-                        <Button size="sm" className="h-7 text-xs font-bold px-4 bg-indigo-600 hover:bg-indigo-700 text-white" disabled={bulkSelected.size === 0 || (bulkQty === "" && bulkWastage === "")} onClick={applyBulkEdit}>
+                        <Input type="number" placeholder="Set Qty" className="h-8 w-20 text-xs font-bold bg-white border-2 border-indigo-200" value={bulkQty} onChange={e => setBulkQty(e.target.value)} />
+                        <Input type="number" placeholder="Set Wastage %" className="h-8 w-28 text-xs font-bold bg-white border-2 border-indigo-200" value={bulkWastage} onChange={e => setBulkWastage(e.target.value)} />
+                        <Button size="sm" className="h-8 text-xs font-bold px-4 bg-indigo-600 hover:bg-indigo-700 text-white" disabled={bulkSelected.size === 0 || (bulkQty === "" && bulkWastage === "")} onClick={applyBulkEdit}>
                           Apply ({bulkSelected.size})
                         </Button>
                       </div>
@@ -596,72 +721,143 @@ export function SaveAsWizardDialog({
                   )}
                 </div>
               </div>
+            )}
+
+            <div className="rounded-xl border shadow-sm overflow-x-auto bg-white min-h-[320px]">
+              <Table>
+                <TableHeader className="bg-muted/30 sticky top-0 z-10">
+                  <TableRow>
+                    <TableHead className="w-[30px]"></TableHead>
+                    <TableHead className="w-[40px] font-bold">Sl</TableHead>
+                    <TableHead className="w-[40px] font-bold"></TableHead>
+                    <TableHead className="font-bold py-4">Item</TableHead>
+                    <TableHead className="w-[100px] font-bold">Shop</TableHead>
+                    {!isCompactView && <TableHead className="w-[120px] font-bold">Item Description</TableHead>}
+                    <TableHead className="w-[60px] font-bold">Unit</TableHead>
+                    <TableHead className="w-[120px] font-bold text-center">Qty / {baseRequiredQty} {requiredUnitType}</TableHead>
+                    <TableHead className="w-[120px] font-bold">Rate / Material Unit</TableHead>
+                    {!isCompactView && (
+                      <>
+                        <TableHead className="w-[110px] font-bold">Base Amount</TableHead>
+                        <TableHead className="w-[70px] font-bold">
+                          <div className="flex flex-col items-center gap-1">
+                            <span className="text-[10px]">Wastage</span>
+                            <Checkbox
+                              checked={selectedItems.length > 0 && selectedItems.every((it) => configByIndex[it.index]?.applyWastage)}
+                              onCheckedChange={(checked) => setConfigByIndex((prev) => {
+                                const next = { ...prev };
+                                selectedItems.forEach((it) => { next[it.index] = { ...next[it.index], applyWastage: !!checked }; });
+                                return next;
+                              })}
+                            />
+                          </div>
+                        </TableHead>
+                        <TableHead className="w-[70px] font-bold">
+                          <div className="flex flex-col items-center gap-1">
+                            <span className="text-[10px]">Round Off</span>
+                            <Checkbox
+                              checked={selectedItems.length > 0 && selectedItems.every((it) => configByIndex[it.index]?.applyRounding)}
+                              onCheckedChange={(checked) => setConfigByIndex((prev) => {
+                                const next = { ...prev };
+                                selectedItems.forEach((it) => { next[it.index] = { ...next[it.index], applyRounding: !!checked }; });
+                                return next;
+                              })}
+                            />
+                          </div>
+                        </TableHead>
+                        <TableHead className="w-[80px] font-bold">Wastage %</TableHead>
+                        <TableHead className="w-[80px] font-bold">Wastage Qty</TableHead>
+                        <TableHead className="w-[90px] font-bold">Total Qty</TableHead>
+                      </>
+                    )}
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {computedResults.map(({ item: it, cfg, line }, idx) => {
+                    const rate = (cfg?.supplyRate || 0) + (cfg?.installRate || 0);
+                    const baseAmt = (cfg?.qty || 0) * rate;
+                    return (
+                      <TableRow key={it.index} className="hover:bg-muted/5 transition-colors border-b bg-white">
+                        <TableCell className="text-center cursor-grab active:cursor-grabbing">
+                          <GripVertical className="h-4 w-4 text-muted-foreground/40" />
+                        </TableCell>
+                        <TableCell className="text-center font-medium text-[10px]">{idx + 1}</TableCell>
+                        <TableCell className="text-center">
+                          <Button variant="ghost" size="sm" onClick={() => removeItem(it.index)} className="h-6 w-6 p-0 text-red-500 hover:text-red-700 hover:bg-red-50">
+                            <span className="text-xs font-bold">×</span>
+                          </Button>
+                        </TableCell>
+                        <TableCell className="font-semibold text-[10px] whitespace-nowrap overflow-hidden text-ellipsis max-w-[150px]">
+                          <TooltipProvider>
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <span className="cursor-help">{it.title || it.description || "Untitled item"}</span>
+                              </TooltipTrigger>
+                              <TooltipContent className="max-w-[300px] break-words">
+                                <p className="text-xs font-bold">{it.title || it.description}</p>
+                              </TooltipContent>
+                            </Tooltip>
+                          </TooltipProvider>
+                        </TableCell>
+                        <TableCell className="text-[10px] whitespace-nowrap overflow-hidden text-ellipsis max-w-[100px]">{it.shop_name || "N/A"}</TableCell>
+                        {!isCompactView && (
+                          <TableCell>
+                            <TooltipProvider delayDuration={300}>
+                              <Tooltip>
+                                <TooltipTrigger asChild>
+                                  <div className="w-full">
+                                    <Input value={cfg?.description ?? ""} onChange={(e) => updateConfig(it.index, { description: e.target.value })} className="h-8 border-muted text-[10px] px-2 truncate" />
+                                  </div>
+                                </TooltipTrigger>
+                                {cfg?.description && (
+                                  <TooltipContent className="max-w-xs break-words whitespace-normal text-xs p-3">
+                                    {cfg.description}
+                                  </TooltipContent>
+                                )}
+                              </Tooltip>
+                            </TooltipProvider>
+                          </TableCell>
+                        )}
+                        <TableCell className="text-[10px] font-medium">{it.unit}</TableCell>
+                        <TableCell>
+                          <div className="flex justify-center">
+                            <Input type="number" value={cfg?.qty ?? 0} onChange={(e) => updateConfig(it.index, { qty: Number(e.target.value) || 0 })} className="h-8 border-muted text-[11px] px-2 font-bold w-20 text-center" />
+                          </div>
+                        </TableCell>
+                        <TableCell className="text-[10px] font-bold">₹{rate.toLocaleString()}</TableCell>
+                        {!isCompactView && (
+                          <>
+                            <TableCell className="text-[10px] font-bold">₹{baseAmt.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</TableCell>
+                            <TableCell className="text-center"><Checkbox checked={!!cfg?.applyWastage} onCheckedChange={(checked) => updateConfig(it.index, { applyWastage: !!checked })} /></TableCell>
+                            <TableCell className="text-center"><Checkbox checked={!!cfg?.applyRounding} onCheckedChange={(checked) => updateConfig(it.index, { applyRounding: !!checked })} /></TableCell>
+                            <TableCell>
+                              <Input type="number" value={cfg?.wastagePct ?? ""} onChange={(e) => updateConfig(it.index, { wastagePct: e.target.value ? Number(e.target.value) : 0 })} placeholder="Global" className="h-8 border-orange-200 text-[10px] px-2 font-bold w-full" />
+                            </TableCell>
+                            <TableCell className="text-[10px] font-bold text-orange-600">{(line?.wastageQty ?? 0).toFixed(2)}</TableCell>
+                            <TableCell className="text-[10px] font-bold">{(line?.roundOffQty ?? cfg?.qty ?? 0).toFixed(2)}</TableCell>
+                          </>
+                        )}
+                      </TableRow>
+                    );
+                  })}
+                  {computedResults.length === 0 && (
+                    <TableRow>
+                      <TableCell colSpan={isCompactView ? 8 : 15} className="text-center py-6 text-muted-foreground italic">
+                        No items selected. Use "+ Add Item" to bring one back.
+                      </TableCell>
+                    </TableRow>
+                  )}
+                  {computedResults.length > 0 && (
+                    <TableRow className="bg-muted/20 font-black">
+                      <TableCell colSpan={(isCompactView ? 8 : 15) - 1} className="text-right py-3 pr-4">Total (Incl. Wastage)</TableCell>
+                      <TableCell className="text-[11px] text-primary">₹{grandTotal.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</TableCell>
+                    </TableRow>
+                  )}
+                </TableBody>
+              </Table>
             </div>
 
-            <div className="rounded-xl border-2 border-slate-200 divide-y flex-1 overflow-y-auto bg-white shadow-inner min-h-0">
-              {selectedItems.map((it) => {
-                const cfg = configByIndex[it.index];
-                return (
-                  <div key={it.index} className="px-3 py-2 flex items-center gap-3 hover:bg-slate-50 transition-colors">
-                    <Checkbox
-                      className="h-4 w-4 border-2"
-                      checked={bulkSelected.has(it.index)}
-                      onCheckedChange={(checked) => {
-                        setBulkSelected(prev => {
-                          const next = new Set(prev);
-                          checked ? next.add(it.index) : next.delete(it.index);
-                          return next;
-                        });
-                      }}
-                    />
-                    <div className="flex-1 min-w-0">
-                      <div className="font-bold text-sm text-slate-800 truncate" title={it.title || it.description}>{it.title || it.description}</div>
-                    </div>
-                    <div className="w-16 shrink-0">
-                      <Label className="text-[10px] font-bold uppercase text-slate-500">Base Qty</Label>
-                      <Input type="number" className="h-7 text-xs font-bold border-2 border-slate-200 px-2" value={cfg?.qty ?? 0} onChange={(e) => updateConfig(it.index, { qty: Number(e.target.value) || 0 })} />
-                    </div>
-                    <div className="w-16 shrink-0">
-                      <Label className="text-[10px] font-bold uppercase text-slate-500">Wastage %</Label>
-                      <Input type="number" className="h-7 text-xs font-bold border-2 border-slate-200 px-2" value={cfg?.wastagePct ?? 0} onChange={(e) => updateConfig(it.index, { wastagePct: Number(e.target.value) || 0 })} />
-                    </div>
-                    <div className="w-20 shrink-0 text-center">
-                      <Label className="text-[10px] font-bold uppercase text-slate-500">Freeze</Label>
-                      <div className="flex justify-center mt-1">
-                        <Checkbox className="h-4 w-4 border-2 rounded-sm" checked={!!cfg?.freezeAndEdit} onCheckedChange={(v) => updateConfig(it.index, { freezeAndEdit: !!v })} />
-                      </div>
-                    </div>
-                    <div className="w-20 shrink-0 text-right">
-                      <Label className="text-[10px] font-bold uppercase text-slate-400 block mb-0.5">Rate</Label>
-                      <div className="text-sm font-black text-slate-700">₹{((cfg?.supplyRate || 0) + (cfg?.installRate || 0)).toLocaleString()}</div>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-        )}
-
-        {step === 4 && (
-          <div className="space-y-4 mt-2 flex flex-col flex-1 min-h-0">
-            <div className="grid grid-cols-2 gap-4 text-sm bg-indigo-50/50 p-4 rounded-xl border-2 border-indigo-100">
-              <div><span className="text-indigo-400 text-xs uppercase font-black tracking-wider">Source Product</span><div className="font-bold text-slate-700 text-base">{sourceProductName}</div></div>
-              <div><span className="text-indigo-400 text-xs uppercase font-black tracking-wider">New Product</span><div className="font-bold text-slate-900 text-base">{newProductName}</div></div>
-              <div><span className="text-indigo-400 text-xs uppercase font-black tracking-wider">Category</span><div className="font-bold text-slate-700 text-base">{category || "-"}</div></div>
-              <div><span className="text-indigo-400 text-xs uppercase font-black tracking-wider">Subcategory</span><div className="font-bold text-slate-700 text-base">{subcategory || "-"}</div></div>
-            </div>
-            <div className="rounded-xl border-2 border-slate-200 divide-y flex-1 overflow-y-auto bg-white shadow-inner min-h-0">
-              {computedResults.map(({ item, line }) => (
-                <div key={item.index} className="px-4 py-3 flex items-center justify-between text-base hover:bg-slate-50 transition-colors">
-                  <span className="font-bold text-slate-700">{item.title || item.description}</span>
-                  <span className="text-slate-500 font-bold">₹{(line?.lineTotal ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
-                </div>
-              ))}
-            </div>
-            <div className="flex items-center justify-between px-5 py-4 bg-slate-100 text-slate-800 border border-slate-200 rounded-xl font-black text-lg shadow-sm">
-              <span className="uppercase tracking-widest text-sm text-slate-500">Calculated Grand Total</span>
-              <span className="text-primary">₹{grandTotal.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
-            </div>
+            {selectedItems.length === 0 && <p className="text-sm text-red-600 font-bold">Select at least one item to submit.</p>}
           </div>
         )}
 
@@ -675,19 +871,19 @@ export function SaveAsWizardDialog({
           </div>
           <div className="flex gap-2">
             <Button variant="ghost" onClick={() => onOpenChange(false)} disabled={isSubmitting}>Cancel</Button>
-            {step < 4 ? (
-              <Button onClick={goNext} disabled={step === 2 && selectedItems.length === 0}>
+            {step < 2 ? (
+              <Button onClick={goNext} disabled={isSubmitting}>
                 Next <ArrowRight className="h-3.5 w-3.5 ml-1" />
               </Button>
             ) : (
-              <Button onClick={handleSubmit} disabled={isSubmitting} className="bg-primary text-white">
+              <Button onClick={handleSubmit} disabled={isSubmitting || selectedItems.length === 0} className="bg-primary text-white">
                 {isSubmitting && <Loader2 className="h-3.5 w-3.5 mr-2 animate-spin" />}
                 Submit for Approval
               </Button>
             )}
           </div>
         </DialogFooter>
-        <ResizeHandle containerRef={wizardDialogRef} />
+        {step === 1 && <ResizeHandle containerRef={wizardDialogRef} />}
       </DialogContent>
     </Dialog>
   );

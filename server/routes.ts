@@ -9167,6 +9167,7 @@ export async function registerRoutes(
             category: productConfig.category || tableData.category || "General",
             category_name: productConfig.category || tableData.category_name || tableData.category || "General",
             subcategory: productConfig.subcategory || null,
+            description: productConfig.description || null,
             step11_items: newItems,
             configBasis,
             materialLines,
@@ -9220,8 +9221,8 @@ export async function registerRoutes(
           }
 
           const step11ProductResult = await query(
-            `INSERT INTO step11_products (product_id, product_name, config_name, category_id, subcategory_id, total_cost, required_unit_type, base_required_qty, wastage_pct_default, dim_a, dim_b, dim_c, created_at, updated_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 0, $9, $10, $11, NOW(), NOW())
+            `INSERT INTO step11_products (product_id, product_name, config_name, category_id, subcategory_id, total_cost, required_unit_type, base_required_qty, wastage_pct_default, dim_a, dim_b, dim_c, description, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW(), NOW())
              RETURNING id`,
             [
               globalProductId,
@@ -9232,9 +9233,11 @@ export async function registerRoutes(
               totalCost,
               configBasis?.requiredUnitType || 'Sqft',
               configBasis?.baseRequiredQty || 1,
+              Number(productConfig.wastagePctDefault) || 0,
               configBasis?.dimA || null,
               configBasis?.dimB || null,
               configBasis?.dimC || null,
+              productConfig.description || null,
             ]
           );
           const step11ProductId = step11ProductResult.rows[0].id;
