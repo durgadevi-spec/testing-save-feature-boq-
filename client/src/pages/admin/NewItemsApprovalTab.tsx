@@ -16,6 +16,7 @@ import { Loader2, CheckCircle2, XCircle, ChevronDown, ChevronUp, Package, ArrowR
 import apiFetch from "@/lib/api";
 import { useToast } from "@/hooks/use-toast";
 import { computeBoq } from "@/lib/boqCalc";
+import { useQueryClient } from "@tanstack/react-query";
 
 // Renders Save / Save As requests submitted from Generate BOM Product
 // Cards. Fully additive: talks only to the new
@@ -70,6 +71,7 @@ export default function NewItemsApprovalTab({ canAct }: { canAct: boolean }) {
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState<"pending" | "approved" | "rejected" | "all">("pending");
   const { toast } = useToast();
+  const queryClient = useQueryClient();
 
   const fetchRequests = async () => {
     try {
@@ -95,6 +97,7 @@ export default function NewItemsApprovalTab({ canAct }: { canAct: boolean }) {
       if (!res.ok) throw new Error(await res.text());
       toast({ title: "Approved" });
       fetchRequests();
+      queryClient.invalidateQueries({ queryKey: ["/api/products"] });
     } catch (err) {
       console.error(err);
       toast({ title: "Error", description: "Failed to approve request", variant: "destructive" });

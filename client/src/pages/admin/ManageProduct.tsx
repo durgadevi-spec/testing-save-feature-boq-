@@ -2299,7 +2299,6 @@ export default function ManageProduct() {
                                                     {isSaving ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" /> Submitting...</> : "Submit for Approval"}
                                                 </Button>
                                             )}
-                                            <Button size="sm" onClick={nextStep} className="w-full sm:w-auto h-10 bg-primary hover:bg-primary/90 text-white font-bold px-6 transition-all">Continue to Review <ArrowRight className="ml-2 h-4 w-4" /></Button>
                                         </div>
                                     </div>
                                 </div>

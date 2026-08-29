@@ -8918,15 +8918,13 @@ export async function registerRoutes(
         );
         const request = insertResult.rows[0];
 
-        // For "save", lock the source items in step11_items so they
-        // can't be re-submitted while this approval is pending.
-        // For "save_as", no locking needed — the source product is unchanged.
-        const updatedStep11 = type === "save"
-          ? step11Items.map((it: any, idx: number) => {
-            if (!validIndexes.includes(idx)) return it;
-            return { ...it, manualApproval: { status: "pending", requestId: request.id, type, submittedAt: new Date().toISOString() } };
-          })
-          : step11Items;
+        // Lock the source items in step11_items so they
+        // can't be re-submitted while this approval is pending, and so we
+        // can find and delete them when the Save As request is approved.
+        const updatedStep11 = step11Items.map((it: any, idx: number) => {
+          if (!validIndexes.includes(idx)) return it;
+          return { ...it, manualApproval: { status: "pending", requestId: request.id, type, submittedAt: new Date().toISOString() } };
+        });
         const updatedTableData = { ...tableData, step11_items: updatedStep11 };
         await query(
           `UPDATE boq_items SET table_data = $1, computed_value = $2 WHERE id = $3`,
@@ -9128,8 +9126,8 @@ export async function registerRoutes(
           const productConfig = calcResults.productConfig || {};
 
           const newItems = snapshotItems.map((it: any, i: number) => {
-            const { manualApproval, ...rest } = it || {};
-            return { ...rest, manual: true, s_no: i + 1 };
+            const { manualApproval, manual, is_pending, ...rest } = it || {};
+            return { ...rest, s_no: i + 1 };
           });
 
           // Build configBasis for a modern product definition (if dimensions were provided in Save As)
@@ -9196,6 +9194,12 @@ export async function registerRoutes(
             await query(
               `UPDATE products SET category = COALESCE($1, category), subcategory = COALESCE($2, subcategory) WHERE id = $3`,
               [chosenCategory, chosenSubcategory, globalProductId]
+            );
+            // If this product was previously trashed/archived, restore it
+            // so it shows up in Manage Product again.
+            await query(
+              `DELETE FROM archive_records WHERE module = 'products' AND origin_id = $1`,
+              [globalProductId]
             );
           } else {
             const productResult = await query(
@@ -9300,16 +9304,21 @@ export async function registerRoutes(
           );
           createdBoqItemId = newItemId;
 
-          // Remove the source items from the original product — they have now
-          // been moved into a brand new product in the BOM.
           const updatedStep11 = step11Items.filter((it: any, idx: number) => {
-            if (itemIndexes.includes(idx) && it.manualApproval && it.manualApproval.requestId === id) {
+            // Remove items at the submitted indexes — they have been moved
+            // into the new product card created above.
+            if (itemIndexes.includes(idx)) {
               return false; // Remove this item
             }
             return true; // Keep this item
           });
-          const updatedTableData = { ...tableData, step11_items: updatedStep11 };
-          await query(`UPDATE boq_items SET table_data = $1, computed_value = $2 WHERE id = $3`, [JSON.stringify(updatedTableData), computeItemValue(updatedTableData), request.boq_item_id]);
+          if (updatedStep11.length === 0) {
+            // Delete the empty source card from the BOM
+            await query(`DELETE FROM boq_items WHERE id = $1`, [request.boq_item_id]);
+          } else {
+            const updatedTableData = { ...tableData, step11_items: updatedStep11 };
+            await query(`UPDATE boq_items SET table_data = $1, computed_value = $2 WHERE id = $3`, [JSON.stringify(updatedTableData), computeItemValue(updatedTableData), request.boq_item_id]);
+          }
 
           if (boqRow.version_id) {
             await query(

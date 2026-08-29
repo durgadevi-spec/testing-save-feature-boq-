@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useRef, useCallback, useMemo } from "react";
 import { Reorder, useDragControls } from "framer-motion";
-import { ChevronUp, ChevronDown, Loader2, CheckCircle2, XCircle, Lock, History, Clock, Briefcase, MapPin, IndianRupee, GripVertical, Search, ArrowUp, ArrowLeft, ArrowRight, ArrowDown, Plus, Trash2, Save, MessageSquare, Users, ChevronsUpDown, Check, X, RefreshCw, Star, Edit, Reply, AlertTriangle, FileText } from "lucide-react";
+import { ChevronUp, ChevronDown, Loader2, CheckCircle2, XCircle, Lock, History, Clock, Briefcase, MapPin, IndianRupee, GripVertical, Search, ArrowUp, ArrowLeft, ArrowRight, ArrowDown, Plus, Trash2, Save, MessageSquare, Users, ChevronsUpDown, Check, X, RefreshCw, Star, Edit, Reply, AlertTriangle, FileText, Maximize2 } from "lucide-react";
 import { fuzzySearch, cn } from "@/lib/utils";
 import { Layout } from "@/components/layout/Layout";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
@@ -44,7 +44,7 @@ import { EditableHsnSac } from './EditableHsnSac';
 import { BoqItemRow } from './BoqItemRow';
 import { SaveConfirmDialog, SaveAsWizardDialog, PendingManualItem } from './ManualItemSaveDialogs';
 
-export const BoqItemCard = React.memo(function BoqItemCard({ boqItem, boqIdx, isVersionSubmitted, expandedProductIds, setExpandedProductIds, getEditedValue, updateEditedField, handleDeleteRow, handleFinalizeProduct, handleAddItem, loadBoqItemsAndEdits, setBoqItems, checkBudgetEarly, handleSaveProject, onCardDragStart, onCardDragOver, onCardDrop, isCardDragOver, mismatches, isCompactView, onSaveAsTemplate, editedFields, comments, users, currentUser, onAddComment, selectedVersionId, totalProducts, onProductOrdinalChange, itemCategoryFilter, bomButtonsEnabled, onAnalysis, allProductNames, onBomShopRateChangeSubmitted, bomShopRateRequests }: {
+export const BoqItemCard = React.memo(function BoqItemCard({ boqItem, boqIdx, isVersionSubmitted, expandedProductIds, setExpandedProductIds, getEditedValue, updateEditedField, handleDeleteRow, handleFinalizeProduct, handleAddItem, loadBoqItemsAndEdits, setBoqItems, checkBudgetEarly, handleSaveProject, onCardDragStart, onCardDragOver, onCardDrop, isCardDragOver, mismatches, isCompactView, onSaveAsTemplate, editedFields, comments, users, currentUser, onAddComment, selectedVersionId, totalProducts, onProductOrdinalChange, itemCategoryFilter, bomButtonsEnabled, onAnalysis, onFocusProduct, allProductNames, onBomShopRateChangeSubmitted, bomShopRateRequests }: {
   boqItem: BOMItem; boqIdx: number; isVersionSubmitted: boolean;
   expandedProductIds: Set<string>; setExpandedProductIds: (fn: (p: Set<string>) => Set<string>) => void;
   getEditedValue: (k: string, f: string, v: any) => any;
@@ -74,6 +74,8 @@ export const BoqItemCard = React.memo(function BoqItemCard({ boqItem, boqIdx, is
   itemCategoryFilter: string;
   bomButtonsEnabled?: boolean;
   onAnalysis: (productName: string) => void;
+  /** Optional: opens Product Focus Mode for this product. When omitted, no focus icon is rendered. */
+  onFocusProduct?: (boqItemId: string) => void;
   allProductNames?: string[];
   onBomShopRateChangeSubmitted?: () => void;
   bomShopRateRequests?: any[];
@@ -213,6 +215,8 @@ export const BoqItemCard = React.memo(function BoqItemCard({ boqItem, boqIdx, is
 
   let displayLines: any[] = step11Items;
   let isEngineBased = false;
+  const isLooseItem = !tableData.materialLines || tableData.targetRequiredQty === undefined || tableData.targetRequiredQty === null;
+  const isMultiItemLooseProduct = isLooseItem && step11Items.length > 1;
 
   if (tableData.materialLines && tableData.targetRequiredQty !== undefined) {
     isEngineBased = true;
@@ -541,6 +545,11 @@ export const BoqItemCard = React.memo(function BoqItemCard({ boqItem, boqIdx, is
           <Button variant="ghost" size="sm" className="h-7 w-7 p-0" title={isExpanded ? "Collapse" : "Expand"} onClick={toggle}>
             {isExpanded ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
           </Button>
+          {onFocusProduct && (
+            <Button variant="ghost" size="sm" className="h-7 w-7 p-0 text-slate-400 hover:text-blue-600" title="Focus on this product" onClick={(e) => { e.stopPropagation(); onFocusProduct(boqItem.id); }}>
+              <Maximize2 className="h-4 w-4" />
+            </Button>
+          )}
         </div>
       </div>
 
@@ -615,7 +624,7 @@ export const BoqItemCard = React.memo(function BoqItemCard({ boqItem, boqIdx, is
                 {!tableData.is_finalized && (
                   <Button variant="outline" size="sm" className="h-7 text-xs border-slate-300 font-bold" disabled={isVersionSubmitted || !bomButtonsEnabled} onClick={() => handleAddItem(boqItem.id)}>+ Add Item</Button>
                 )}
-                <Button variant="default" size="sm" className="h-7 text-xs bg-green-600 hover:bg-green-700 text-white font-bold" disabled={isVersionSubmitted || tableData.is_finalized} onClick={() => handleFinalizeProduct(boqItem.id)}>Finalize</Button>
+                <Button variant="default" size="sm" className="h-7 text-xs bg-green-600 hover:bg-green-700 text-white font-bold" disabled={isVersionSubmitted || tableData.is_finalized || isMultiItemLooseProduct} onClick={() => handleFinalizeProduct(boqItem.id)}>Finalize</Button>
               </div>
             </div>
 
@@ -659,7 +668,7 @@ export const BoqItemCard = React.memo(function BoqItemCard({ boqItem, boqIdx, is
                 <Button variant="outline" size="sm" className="h-7 text-xs font-bold border-slate-300 shadow-sm" disabled={isVersionSubmitted} onClick={() => onSaveAsTemplate?.(boqItem)}>Save as Template</Button>
                 {pendingManualItems.length > 0 && !isVersionSubmitted && (
                   <>
-                    {pendingManualItems.length < step11Items.length && (
+                    {!isLooseItem && (
                       <Button
                         variant="outline"
                         size="sm"
@@ -772,22 +781,25 @@ export const BoqItemCard = React.memo(function BoqItemCard({ boqItem, boqIdx, is
             </div>
 
             {/* Row 5: Project Target */}
-            {isEngineBased && (
+            {(isEngineBased || isMultiItemLooseProduct) && (
               <div className={`flex items-center gap-3 pt-1 ${isLumpSum ? "opacity-50 pointer-events-none" : ""}`}>
-                <span className="text-xs font-black text-slate-500 uppercase tracking-tight">Project Target:</span>
+                <span className={`text-xs font-black uppercase tracking-tight ${isMultiItemLooseProduct ? "text-red-500" : "text-slate-500"}`}>
+                  {isMultiItemLooseProduct ? "Project Target (Save As Required):" : "Project Target:"}
+                </span>
                 <div className="flex items-center gap-2">
                   <Input
                     type="number"
                     className="h-8 w-24 text-xs font-black text-blue-600 border-blue-200 focus:ring-1 ring-blue-100 bg-white"
-                    value={displayQty}
+                    value={isMultiItemLooseProduct ? "" : displayQty}
                     onChange={(e) => {
                       const val = parseFloat(e.target.value) || 0;
-                      if (isLumpSum) return;
+                      if (isLumpSum || isMultiItemLooseProduct) return;
                       setLocalTarget(Math.max(0, val));
                     }}
 
-                    disabled={isVersionSubmitted || tableData.is_finalized}
+                    disabled={isVersionSubmitted || tableData.is_finalized || isMultiItemLooseProduct}
                     onBlur={async (e) => {
+                      if (isMultiItemLooseProduct) return;
                       const newVal = parseFloat(e.target.value);
                       const currentVal = tableData.targetRequiredQty ?? 1;
                       if (isNaN(newVal) || newVal === currentVal || newVal < 0) { setLocalTarget(currentVal); return; }
@@ -798,8 +810,15 @@ export const BoqItemCard = React.memo(function BoqItemCard({ boqItem, boqIdx, is
                       } catch (err) { console.error("Failed to update target qty", err); }
                     }}
                   />
-                  <span className="text-xs font-black text-blue-600">{isLumpSum ? "LS" : (tableData.configBasis?.requiredUnitType || "Unit")}</span>
+                  <span className="text-xs font-black text-blue-600">
+                    {isLumpSum ? "LS" : (isMultiItemLooseProduct ? "Unit" : (tableData.configBasis?.requiredUnitType || "Unit"))}
+                  </span>
                 </div>
+                {isMultiItemLooseProduct && (
+                  <span className="text-[10px] font-bold text-red-600 ml-2 bg-red-50 px-2 py-0.5 rounded border border-red-200">
+                    Please use 'Save As' to convert this multi-item group into a Product.
+                  </span>
+                )}
               </div>
             )}
           </div>
