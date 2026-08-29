@@ -5138,17 +5138,17 @@ export async function registerRoutes(
       try {
         const result = await query(`
           SELECT ms.*, 
-                 COALESCE(mt.name, mt2.name, m.name) as template_name, 
+                 COALESCE(mt.name, mt2.name, m.name, ms.material_name) as template_name, 
                  COALESCE(mt.code, mt2.code, m.code) as template_code, 
                  COALESCE(mt.category, mt2.category, m.category) as template_category,
                  COALESCE(ms.brandname, m.brandname) as brandname,
                  COALESCE(ms.subcategory, m.subcategory) as subcategory,
                  COALESCE(ms.technicalspecification, m.technicalspecification) as technicalspecification,
-                 s.name as shop_name, 
+                 COALESCE(s.name, ms.requested_shop_name) as shop_name, 
                  u.username as submitted_by_username
           FROM material_submissions ms
           LEFT JOIN material_templates mt ON ms.template_id = mt.id
-          LEFT JOIN materials m ON ms.previous_material_id IS NOT NULL AND ms.previous_material_id::uuid = m.id
+          LEFT JOIN materials m ON m.id = CASE WHEN ms.previous_material_id ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN ms.previous_material_id::uuid ELSE NULL END
           LEFT JOIN material_templates mt2 ON m.template_id = mt2.id
           LEFT JOIN shops s ON ms.shop_id = s.id
           LEFT JOIN users u ON ms.submitted_by = u.id
@@ -5285,7 +5285,7 @@ export async function registerRoutes(
             [submission.template_id],
           );
           template = templateResult.rows[0] || {};
-        } else if (submission.previous_material_id) {
+        } else if (submission.previous_material_id && /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(submission.previous_material_id)) {
           const templateResult = await query(
             "SELECT * FROM materials WHERE id = $1",
             [submission.previous_material_id],
@@ -5300,7 +5300,7 @@ export async function registerRoutes(
           [
             materialId,
             template.name || submission.material_name,
-            template.code,
+            template.code || `CUST-${Math.floor(Math.random() * 1000000)}`,
             submission.rate,
             submission.shop_id,
             submission.unit || template.unit,

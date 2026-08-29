@@ -57,7 +57,11 @@ export function ProductFocusDialog({
             <DialogContent
                 className={cn(
                     "flex flex-col p-0 gap-0",
-                    isFullScreen ? "max-w-[95vw] w-[95vw] h-[95vh]" : "sm:max-w-4xl max-h-[85vh]"
+                    isFullScreen
+                        // True edge-to-edge full screen: override the Dialog's default
+                        // centered/rounded/max-width classes rather than just growing them.
+                        ? "fixed inset-0 left-0 top-0 translate-x-0 translate-y-0 w-screen h-screen max-w-none max-h-none rounded-none sm:rounded-none border-0"
+                        : "sm:max-w-4xl max-h-[85vh]"
                 )}
             >
                 <DialogHeader className="px-4 py-3 border-b flex-row items-center justify-between space-y-0">
