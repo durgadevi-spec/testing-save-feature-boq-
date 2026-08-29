@@ -218,6 +218,40 @@ const getItemMetrics = (td: any) => {
   }
   return { itemTotal, itemQty, itemRate: finalRate, step11 };
 };
+
+/**
+ * Single source of truth for the quantity used anywhere in Finalize BOQ
+ * (display, totals, exports, PDF).
+ *
+ * Priority (highest first):
+ *   1. Lump sum (explicit `is_lump_sum` flag OR unit typed as "ls") → always 1.
+ *   2. `productQuantities` (live in-memory state for this item) — this is
+ *      always kept in sync: it is (re)seeded from the BOM's `targetRequiredQty`
+ *      every time the item is loaded (see the `restoredQtys` / new-item
+ *      restore logic below), and only ever changes after that when the user
+ *      *directly* types into the Qty cell. So on a fresh load it reflects
+ *      the current BOM value, and if the user edits it, their edit is
+ *      respected — the field stays fully editable, same as before.
+ *   3. BOM-driven qty (`targetRequiredQty`) as a fallback for the brief
+ *      moment before `productQuantities` has been seeded.
+ *   4. Fallback to the first step11 item's qty, or 0.
+ */
+const getEffectiveQty = (
+  td: any,
+  itemId: string,
+  productQuantities: { [id: string]: string },
+  productUnits: { [id: string]: string },
+  fallbackQty: number
+): number => {
+  const isLumpSum = td?.is_lump_sum === true || productUnits[itemId]?.toLowerCase() === 'ls';
+  if (isLumpSum) return 1;
+  const manualQtyStr = productQuantities[itemId];
+  if (manualQtyStr !== undefined) return parseFloat(manualQtyStr) || 0;
+  if (td?.targetRequiredQty !== undefined && td?.targetRequiredQty !== null) {
+    return Number(td.targetRequiredQty);
+  }
+  return Number(fallbackQty) || 0;
+};
 // ─────────────────────────────────────────────────────────────────────────────
 
 /** Parse a product image field which may be a plain URL or a JSON-serialised array of URLs */
@@ -1600,11 +1634,7 @@ export default function FinalizeBoq() {
 
       const { itemRate, itemQty } = getItemMetrics(td);
 
-      const manualQtyStr = productQuantities[item.id];
-      const isLumpSum = td.is_lump_sum || productUnits[item.id]?.toLowerCase() === 'ls';
-      const displayQty = isLumpSum ? 1 : (manualQtyStr !== undefined
-        ? (parseFloat(manualQtyStr) || 0)
-        : itemQty);
+      const displayQty = getEffectiveQty(td, item.id, productQuantities, productUnits, itemQty);
 
       const baseTotalValue = roundOff ? Math.round(itemRate * displayQty) : itemRate * displayQty;
       totalValueSum += baseTotalValue;
@@ -1971,7 +2001,17 @@ export default function FinalizeBoq() {
             if (typeof td.finalize_description === "string") {
               restoredDescs[item.id] = td.finalize_description;
             }
-            if (td.finalize_qty !== undefined && td.finalize_qty !== null) {
+            // Seed the editable Qty cell. The BOM's `targetRequiredQty` (the
+            // "Project Target" set on the Generate BOM page) is the live,
+            // authoritative quantity, so it always wins here on load — this
+            // is what stops a stale saved `finalize_qty` override (e.g. one
+            // written incidentally while editing the Unit field) from
+            // sticking around forever after the BOM qty changes. If there is
+            // no BOM qty at all (item wasn't generated from a BOM), fall
+            // back to whatever was previously saved/typed in Finalize BOQ.
+            if (td.targetRequiredQty !== undefined && td.targetRequiredQty !== null) {
+              restoredQtys[item.id] = String(td.targetRequiredQty);
+            } else if (td.finalize_qty !== undefined && td.finalize_qty !== null) {
               restoredQtys[item.id] = String(td.finalize_qty);
             }
             if (td.finalize_unit !== undefined && td.finalize_unit !== null) {
@@ -2437,7 +2477,9 @@ export default function FinalizeBoq() {
         if (td.finalize_description) {
           setProductDescriptions(prev => ({ ...prev, [newItem.id]: td.finalize_description }));
         }
-        if (td.finalize_qty !== undefined) {
+        if (td.targetRequiredQty !== undefined && td.targetRequiredQty !== null) {
+          setProductQuantities(prev => ({ ...prev, [newItem.id]: String(td.targetRequiredQty) }));
+        } else if (td.finalize_qty !== undefined && td.finalize_qty !== null) {
           setProductQuantities(prev => ({ ...prev, [newItem.id]: String(td.finalize_qty) }));
         }
         if (td.finalize_unit) {
@@ -2651,7 +2693,7 @@ export default function FinalizeBoq() {
       let td = item.table_data || {};
       if (typeof td === "string") try { td = JSON.parse(td); } catch { td = {}; }
       const { itemRate, itemQty } = getItemMetrics(td);
-      const displayQty = productQuantities[item.id] !== undefined ? (parseFloat(productQuantities[item.id]) || 0) : itemQty;
+      const displayQty = getEffectiveQty(td, item.id, productQuantities, productUnits, itemQty);
 
       const oRateRaw = parseFloat((overrideRates[item.id] ?? globalOverrideValue) || "0") || 0;
       const itemOverrideType = overrideTypes[item.id] ?? globalOverrideType ?? "value";
@@ -2746,7 +2788,7 @@ export default function FinalizeBoq() {
     let td = item.table_data || {};
     if (typeof td === "string") try { td = JSON.parse(td); } catch { td = {}; }
     const { itemRate, itemQty } = getItemMetrics(td);
-    const displayQty = productQuantities[item.id] !== undefined ? (parseFloat(productQuantities[item.id]) || 0) : itemQty;
+    const displayQty = getEffectiveQty(td, item.id, productQuantities, productUnits, itemQty);
     const oRateRaw = parseFloat((overrideRates[item.id] ?? globalOverrideValue) || "0") || 0;
     const itemOverrideType = overrideTypes[item.id] ?? globalOverrideType ?? "value";
     const effectiveOverrideRate = itemOverrideType === "percentage" ? (itemRate * oRateRaw / 100) : oRateRaw;
@@ -3478,7 +3520,7 @@ export default function FinalizeBoq() {
           let td = it.table_data || {};
           if (typeof td === 'string') try { td = JSON.parse(td); } catch { td = {}; }
           acc[it.id] = {
-            qty: String(productQuantities[it.id] ?? td.finalize_qty ?? ""),
+            qty: String(getEffectiveQty(td, it.id, productQuantities, productUnits, 0)),
             rate: String(overrideRates[it.id] ?? td.finalize_override_rate ?? ""),
             unit: String(productUnits[it.id] ?? td.finalize_unit ?? ""),
             description: String(productDescriptions[it.id] ?? td.finalize_description ?? ""),
@@ -3494,7 +3536,7 @@ export default function FinalizeBoq() {
         let td = item.table_data || {};
         if (typeof td === 'string') try { td = JSON.parse(td); } catch { td = {}; }
         const { itemRate, itemQty } = getItemMetrics(td);
-        const displayQty = parseFloat(productQuantities[item.id] ?? td.finalize_qty ?? itemQty) || 0;
+        const displayQty = getEffectiveQty(td, item.id, productQuantities, productUnits, itemQty);
         const totalVal = itemRate * displayQty;
         const oRateRaw = parseFloat((overrideRates[item.id] ?? td.finalize_override_rate ?? globalOverrideValue) || "0") || 0;
         const itemOverrideType = td.finalize_override_type ?? globalOverrideType ?? "value";
@@ -3643,12 +3685,7 @@ export default function FinalizeBoq() {
         const category = tableData.category || "";
 
         const isLumpSum = tableData.is_lump_sum === true || productUnits[boqItem.id]?.toLowerCase() === 'ls';
-        const manualQtyStr = productQuantities[boqItem.id];
-        const displayQty = isLumpSum ? 1 : (manualQtyStr !== undefined
-          ? (parseFloat(manualQtyStr) || 0)
-          : (tableData.targetRequiredQty !== undefined && tableData.targetRequiredQty !== null
-            ? Number(tableData.targetRequiredQty)
-            : Number(currentStep11Items[0]?.qty || 0)));
+        const displayQty = getEffectiveQty(tableData, boqItem.id, productQuantities, productUnits, Number(currentStep11Items[0]?.qty || 0));
 
         // Totals — same calc as row render
         let _exTotal = 0;
@@ -3964,12 +4001,7 @@ export default function FinalizeBoq() {
         }
 
         const isLumpSum = tableData.is_lump_sum === true || productUnits[boqItem.id]?.toLowerCase() === 'ls';
-        const manualQtyStr = productQuantities[boqItem.id];
-        const displayQty = isLumpSum ? 1 : (manualQtyStr !== undefined
-          ? (parseFloat(manualQtyStr) || 0)
-          : (tableData.targetRequiredQty !== undefined && tableData.targetRequiredQty !== null
-            ? Number(tableData.targetRequiredQty)
-            : Number(currentStep11Items[0]?.qty || 0)));
+        const displayQty = getEffectiveQty(tableData, boqItem.id, productQuantities, productUnits, Number(currentStep11Items[0]?.qty || 0));
 
         // Totals — same calc as row render
         let _total = 0;
@@ -6538,26 +6570,36 @@ export default function FinalizeBoq() {
                             )}
                             {!hiddenPredefinedCols.qty && (
                               <td className="border-r px-2 py-1 text-center font-semibold text-gray-800 align-middle w-32 min-w-[100px]">
-                                <input
-                                  type="number"
-                                  value={tableData.is_lump_sum ? 1 : (productQuantities[boqItem.id] ?? (tableData.targetRequiredQty !== undefined ? tableData.targetRequiredQty : (currentStep11Items[0]?.qty || 0)))}
-                                  disabled={isVersionSubmitted || tableData.is_lump_sum || (productUnits[boqItem.id]?.toLowerCase() === 'ls')}
-                                  onWheel={(e) => e.currentTarget.blur()}
-                                  onChange={e => {
-                                    const newQty = e.target.value;
-                                    const isLS = productUnits[boqItem.id]?.toLowerCase() === 'ls';
-                                    if (isLS) return;
-                                    setProductQuantities(prev => ({ ...prev, [boqItem.id]: newQty }));
-                                  }}
-                                  onBlur={async () => {
-                                    const newQty = productQuantities[boqItem.id];
-                                    const oldQty = tableData.finalize_qty;
-                                    await saveItemLayout(boqItem.id, undefined, undefined, undefined, productQuantities[boqItem.id], undefined, undefined, undefined, undefined,
-                                      String(oldQty ?? "") !== String(newQty ?? "") ? { field: "Quantity", oldValue: oldQty, newValue: newQty } : undefined);
-                                  }}
-                                  className={`w-full border border-transparent focus:border-2 focus:border-blue-500 rounded p-0.5 text-[10px] focus:text-[12px] focus:ring-1 ring-blue-300 outline-none transition-all duration-150 ease-out focus:relative focus:z-30 focus:shadow-md ${(tableData.is_lump_sum || (productUnits[boqItem.id]?.toLowerCase() === 'ls')) ? 'bg-transparent text-gray-500' : 'bg-blue-100/50'} focus:bg-white text-center font-semibold h-7 focus:h-8 ${getIsModified(boqItem.id, "qty", productQuantities[boqItem.id] ?? (tableData.targetRequiredQty !== undefined ? tableData.targetRequiredQty : (currentStep11Items[0]?.qty || 0))) ? "text-[#1E3A8A] font-extrabold border-2 border-[#93C5FD] ring-2 ring-[#BFDBFE] rounded" : ""}`}
-                                  placeholder="Qty"
-                                />
+                                {(() => {
+                                  // Qty always starts out synced from the BOM's Project Target
+                                  // (targetRequiredQty) whenever the page loads — see the
+                                  // restoredQtys / getEffectiveQty seeding logic. It stays a
+                                  // normal editable field on top of that, so it can still be
+                                  // typed over directly here when needed.
+                                  const effQty = getEffectiveQty(tableData, boqItem.id, productQuantities, productUnits, Number(currentStep11Items[0]?.qty || 0));
+                                  return (
+                                    <input
+                                      type="number"
+                                      value={effQty}
+                                      disabled={isVersionSubmitted || tableData.is_lump_sum || (productUnits[boqItem.id]?.toLowerCase() === 'ls')}
+                                      onWheel={(e) => e.currentTarget.blur()}
+                                      onChange={e => {
+                                        const newQty = e.target.value;
+                                        const isLS = productUnits[boqItem.id]?.toLowerCase() === 'ls';
+                                        if (isLS) return;
+                                        setProductQuantities(prev => ({ ...prev, [boqItem.id]: newQty }));
+                                      }}
+                                      onBlur={async () => {
+                                        const newQty = productQuantities[boqItem.id];
+                                        const oldQty = tableData.finalize_qty;
+                                        await saveItemLayout(boqItem.id, undefined, undefined, undefined, productQuantities[boqItem.id], undefined, undefined, undefined, undefined,
+                                          String(oldQty ?? "") !== String(newQty ?? "") ? { field: "Quantity", oldValue: oldQty, newValue: newQty } : undefined);
+                                      }}
+                                      className={`w-full border border-transparent focus:border-2 focus:border-blue-500 rounded p-0.5 text-[10px] focus:text-[12px] focus:ring-1 ring-blue-300 outline-none transition-all duration-150 ease-out focus:relative focus:z-30 focus:shadow-md ${(tableData.is_lump_sum || (productUnits[boqItem.id]?.toLowerCase() === 'ls')) ? 'bg-transparent text-gray-500' : 'bg-blue-100/50'} focus:bg-white text-center font-semibold h-7 focus:h-8 ${getIsModified(boqItem.id, "qty", effQty) ? "text-[#1E3A8A] font-extrabold border-2 border-[#93C5FD] ring-2 ring-[#BFDBFE] rounded" : ""}`}
+                                      placeholder="Qty"
+                                    />
+                                  );
+                                })()}
                               </td>
                             )}
                             {!hiddenPredefinedCols.rate && (
@@ -6568,7 +6610,7 @@ export default function FinalizeBoq() {
                             {!hiddenPredefinedCols.system_total && (
                               <td className="border-r px-2 py-1.5 text-right font-semibold text-gray-800 bg-gray-50 align-middle text-[10px] w-32">
                                 ₹{(() => {
-                                  const displayQty = (tableData.is_lump_sum || productUnits[boqItem.id]?.toLowerCase() === 'ls') ? 1 : (productQuantities[boqItem.id] !== undefined ? parseFloat(productQuantities[boqItem.id]) || 0 : (tableData.targetRequiredQty !== undefined ? Number(tableData.targetRequiredQty) : Number(currentStep11Items[0]?.qty || 0)));
+                                  const displayQty = getEffectiveQty(tableData, boqItem.id, productQuantities, productUnits, Number(currentStep11Items[0]?.qty || 0));
                                   const rawVal = rateSqft * displayQty;
                                   return (roundOff ? Math.round(rawVal) : rawVal).toLocaleString(undefined, { minimumFractionDigits: roundOff ? 0 : 2, maximumFractionDigits: roundOff ? 0 : 2 });
                                 })()}
@@ -6615,8 +6657,7 @@ export default function FinalizeBoq() {
                                 ₹{(() => {
                                   const overrideType = overrideTypes[boqItem.id] ?? globalOverrideType ?? "value";
                                   const overrideInputVal = parseFloat((overrideRates[boqItem.id] ?? globalOverrideValue) || "0") || 0;
-                                  const isLumpSum = tableData.is_lump_sum || productUnits[boqItem.id]?.toLowerCase() === 'ls';
-                                  const displayQty = isLumpSum ? 1 : (productQuantities[boqItem.id] !== undefined ? parseFloat(productQuantities[boqItem.id]) || 0 : (tableData.targetRequiredQty || currentStep11Items[0]?.qty || 0));
+                                  const displayQty = getEffectiveQty(tableData, boqItem.id, productQuantities, productUnits, Number(currentStep11Items[0]?.qty || 0));
                                   const systemTotal = rateSqft * displayQty;
 
                                   let effectiveOverrideRate = 0;
@@ -6637,9 +6678,7 @@ export default function FinalizeBoq() {
                             )}
                             {/* Custom columns */}
                             {(() => {
-                              const isLumpSum = tableData.is_lump_sum === true || productUnits[boqItem.id]?.toLowerCase() === 'ls';
-                              const manualQtyStr = productQuantities[boqItem.id];
-                              const displayQty = isLumpSum ? 1 : (manualQtyStr !== undefined ? (parseFloat(manualQtyStr) || 0) : (tableData.targetRequiredQty || currentStep11Items[0]?.qty || 0));
+                              const displayQty = getEffectiveQty(tableData, boqItem.id, productQuantities, productUnits, Number(currentStep11Items[0]?.qty || 0));
                               const baseTotalValue = rateSqft * displayQty;
 
                               // Calculate effective override rate based on type

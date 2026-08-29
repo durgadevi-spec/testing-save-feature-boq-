@@ -39,6 +39,9 @@ type ManualItemRequest = {
   approved_by_name: string | null;
   created_at: string;
   decided_at: string | null;
+  // Present when the backend could join the source product card — contains
+  // that product's full, current table_data (all items, old + new).
+  source_table_data?: any;
 };
 
 const asArray = (v: any) => {
@@ -150,10 +153,57 @@ export default function NewItemsApprovalTab({ canAct }: { canAct: boolean }) {
       )}
 
       {requests.map((r) => {
-        const items = asArray(r.items);
+        const newItems = asArray(r.items);
         const calcResults = asObj(r.calculated_results);
         const productConfig = asObj(calcResults.productConfig);
         const isExpanded = expandedId === r.id;
+
+        const globalProductItemsRaw = asArray((r as any).global_product_items);
+        const globalProductItems = globalProductItemsRaw.map((it: any, i: number) => ({
+           id: it.material_id || `global-${i}`,
+           title: it.material_name,
+           description: it.material_name,
+           unit: it.unit,
+           qty: it.qty,
+           qtyPerSqf: it.qty,
+           supply_rate: it.supply_rate,
+           install_rate: it.install_rate,
+           location: it.location,
+           freezeAndEdit: it.freeze_and_edit,
+           shop_name: ""
+        }));
+
+        let mergedItems = [...newItems];
+        if (r.type === "save") {
+           mergedItems = [...globalProductItems];
+           if (r.status !== 'approved') {
+               // Append them if they aren't in the global product yet (pending or rejected)
+               const taggedNewItems = newItems.map((it: any) => ({
+                 ...it,
+                 manualApproval: { requestId: r.id, status: r.status }
+               }));
+               mergedItems.push(...taggedNewItems);
+           } else {
+               // If approved, they are already inserted into globalProductItems by the backend.
+               // We just need to identify and highlight them by matching names.
+               const newNames = new Set(newItems.map((ni: any) => (ni.title || ni.description || ni.material_name || "").toLowerCase().trim()));
+               mergedItems = mergedItems.map((it: any) => {
+                  const title = (it.title || it.description || it.material_name || "").toLowerCase().trim();
+                  if (newNames.has(title)) {
+                      return { ...it, manualApproval: { requestId: r.id, status: r.status } };
+                  }
+                  return it;
+               });
+           }
+        }
+
+        const items: any[] = r.type === "save" ? mergedItems : newItems;
+        const usingFullProductView = r.type === "save";
+        const isNewItem = (it: any) =>
+          usingFullProductView
+            ? !!(it?.manualApproval && it.manualApproval.requestId === r.id)
+            : true;
+        const newItemCount = r.type === "save" ? newItems.length : items.length;
 
         // Build basis for computeBoq from submitted product config
         const basis = {
@@ -192,7 +242,7 @@ export default function NewItemsApprovalTab({ canAct }: { canAct: boolean }) {
                   <div>
                     <div className="font-bold text-sm text-slate-800 flex items-center gap-2">
                       {r.type === "save" ? (
-                        <>Add {items.length} item{items.length === 1 ? "" : "s"} to <span className="text-primary">{r.source_product_name}</span></>
+                        <>Add {newItemCount} item{newItemCount === 1 ? "" : "s"} to <span className="text-primary">{r.source_product_name}</span></>
                       ) : (
                         <>New Manual Product: <span className="text-primary">{r.new_product_name}</span></>
                       )}
@@ -230,6 +280,12 @@ export default function NewItemsApprovalTab({ canAct }: { canAct: boolean }) {
                         <p className="font-bold text-sm truncate">{r.new_product_name}</p>
                       </div>
                     )}
+                    {productConfig.category && (
+                      <div className="bg-white rounded-lg border p-3">
+                        <p className="text-[10px] uppercase font-bold text-muted-foreground">Category</p>
+                        <p className="font-bold text-sm truncate">{productConfig.category}{productConfig.subcategory ? ` / ${productConfig.subcategory}` : ""}</p>
+                      </div>
+                    )}
                     <div className="bg-white rounded-lg border p-3">
                       <p className="text-[10px] uppercase font-bold text-muted-foreground">Unit Type</p>
                       <p className="font-bold text-sm">{productConfig.requiredUnitType || "Sqft"}</p>
@@ -260,6 +316,7 @@ export default function NewItemsApprovalTab({ canAct }: { canAct: boolean }) {
                       <TableHeader className="bg-muted/30">
                         <TableRow>
                           <TableHead className="w-[40px] font-bold">Sl</TableHead>
+                          {usingFullProductView && <TableHead className="w-[70px] font-bold">Status</TableHead>}
                           <TableHead className="font-bold py-4">Item</TableHead>
                           <TableHead className="w-[60px] font-bold">Unit</TableHead>
                           <TableHead className="w-[100px] font-bold">Qty</TableHead>
@@ -282,6 +339,7 @@ export default function NewItemsApprovalTab({ canAct }: { canAct: boolean }) {
                           const rate = supplyRate + installRate;
                           const baseAmt = baseQty * rate;
                           const isFrozen = it.freezeAndEdit;
+                          const isNew = isNewItem(it);
 
                           // Use computeBoq results if available
                           const computed = boqRes?.computed?.[idx];
@@ -293,9 +351,23 @@ export default function NewItemsApprovalTab({ canAct }: { canAct: boolean }) {
                           return (
                             <TableRow
                               key={idx}
-                              className={`hover:bg-muted/5 text-[11px] ${isFrozen ? "bg-cyan-100/60 border-l-4 border-l-cyan-500 shadow-sm" : ""}`}
+                              className={`hover:bg-muted/5 text-[11px] ${isNew
+                                ? "bg-emerald-50 border-l-4 border-l-emerald-500 shadow-sm"
+                                : isFrozen
+                                  ? "bg-cyan-100/60 border-l-4 border-l-cyan-500 shadow-sm"
+                                  : ""
+                                }`}
                             >
                               <TableCell className="text-center font-medium">{idx + 1}</TableCell>
+                              {usingFullProductView && (
+                                <TableCell>
+                                  {isNew ? (
+                                    <Badge className="bg-emerald-100 text-emerald-700 hover:bg-emerald-100 font-bold text-[10px] px-1.5 py-0">New</Badge>
+                                  ) : (
+                                    <span className="text-[10px] text-slate-400 font-medium">Existing</span>
+                                  )}
+                                </TableCell>
+                              )}
                               <TableCell className="font-semibold">{it.title || it.description}</TableCell>
                               <TableCell className="text-[10px] font-medium">{it.unit || "-"}</TableCell>
                               <TableCell className="text-[11px] font-bold text-center">{baseQty}</TableCell>
@@ -310,9 +382,10 @@ export default function NewItemsApprovalTab({ canAct }: { canAct: boolean }) {
                             </TableRow>
                           );
                         })}
-                        {/* Grand Total Row */}
+                        {/* Grand Total Row — sums whatever is currently shown (full
+                            product when merged view is active, submitted items otherwise) */}
                         <TableRow className="bg-muted/20 font-black">
-                          <TableCell colSpan={6} className="text-right py-3 pr-4">Total (Incl. Wastage)</TableCell>
+                          <TableCell colSpan={usingFullProductView ? 7 : 6} className="text-right py-3 pr-4">Total (Incl. Wastage)</TableCell>
                           <TableCell className="text-[11px] font-bold">
                             ₹{items.reduce((sum: number, it: any) => {
                               const rate = Number(it.supply_rate ?? 0) + Number(it.install_rate ?? 0);
@@ -321,13 +394,21 @@ export default function NewItemsApprovalTab({ canAct }: { canAct: boolean }) {
                           </TableCell>
                           <TableCell colSpan={3}></TableCell>
                           <TableCell className="text-[11px] font-bold text-primary">
-                            ₹{(boqRes?.grandTotal ?? calcResults?.grandTotal ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                            ₹{(r.type === "save"
+                              ? items.reduce((sum: number, it: any, idx: number) => sum + (boqRes?.computed?.[idx]?.lineTotal ?? (Number(it.qtyPerSqf ?? it.qty ?? 0) * (Number(it.supply_rate ?? 0) + Number(it.install_rate ?? 0)))), 0)
+                              : (boqRes?.grandTotal ?? calcResults?.grandTotal ?? 0)
+                            ).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                           </TableCell>
                           {boqRes && <TableCell></TableCell>}
                         </TableRow>
                       </TableBody>
                     </Table>
                   </div>
+                  {usingFullProductView && (
+                    <p className="text-[11px] text-slate-400 px-1">
+                      Showing the full product — <span className="font-bold text-emerald-600">{newItemCount} newly added item{newItemCount === 1 ? "" : "s"}</span> highlighted in green, existing items shown for context.
+                    </p>
+                  )}
 
                   {r.status === "rejected" && r.rejection_reason && (
                     <div className="text-xs text-red-600"><span className="font-bold">Rejection reason:</span> {r.rejection_reason}</div>

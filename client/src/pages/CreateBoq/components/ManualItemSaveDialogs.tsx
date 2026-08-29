@@ -5,8 +5,11 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Loader2, ArrowLeft, ArrowRight, GripVertical } from "lucide-react";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from "@/components/ui/command";
+import { Loader2, ArrowLeft, ArrowRight, GripVertical, ChevronsUpDown, Check } from "lucide-react";
 import { computeBoq } from "@/lib/boqCalc";
+import apiFetch from "@/lib/api";
 
 // ── Drag-to-resize handle ───────────────────────────────────────────────
 function ResizeHandle({ containerRef }: { containerRef: React.RefObject<HTMLElement | null> }) {
@@ -151,6 +154,57 @@ export function SaveAsWizardDialog({
   const [nameError, setNameError] = useState("");
   const [configByIndex, setConfigByIndex] = useState<Record<number, ItemConfig>>({});
 
+  // ── Category / Subcategory (required for the new product being created) ──
+  const [category, setCategory] = useState("");
+  const [subcategory, setSubcategory] = useState("");
+  const [categoryError, setCategoryError] = useState("");
+  const [categories, setCategories] = useState<string[]>([]);
+  const [subcategories, setSubcategories] = useState<string[]>([]);
+  const [loadingCategories, setLoadingCategories] = useState(false);
+  const [loadingSubcategories, setLoadingSubcategories] = useState(false);
+  const [categoryOpen, setCategoryOpen] = useState(false);
+  const [subcategoryOpen, setSubcategoryOpen] = useState(false);
+  const [categorySearch, setCategorySearch] = useState("");
+  const [subcategorySearch, setSubcategorySearch] = useState("");
+
+  // Load the same category list used elsewhere in the app (Manage Product, etc.)
+  useEffect(() => {
+    if (!open) return;
+    (async () => {
+      setLoadingCategories(true);
+      try {
+        const res = await apiFetch("/api/material-categories");
+        if (res.ok) {
+          const d = await res.json();
+          setCategories(Array.isArray(d.categories) ? d.categories : []);
+        }
+      } catch (err) {
+        console.error("Failed to load categories:", err);
+      } finally {
+        setLoadingCategories(false);
+      }
+    })();
+  }, [open]);
+
+  // Load subcategories whenever the chosen category changes
+  useEffect(() => {
+    if (!category) { setSubcategories([]); return; }
+    (async () => {
+      setLoadingSubcategories(true);
+      try {
+        const res = await apiFetch(`/api/material-subcategories/${encodeURIComponent(category)}`);
+        if (res.ok) {
+          const d = await res.json();
+          setSubcategories(Array.isArray(d.subcategories) ? d.subcategories : []);
+        }
+      } catch (err) {
+        console.error("Failed to load subcategories:", err);
+      } finally {
+        setLoadingSubcategories(false);
+      }
+    })();
+  }, [category]);
+
   const [dimA, setDimA] = useState<number | undefined>();
   const [dimB, setDimB] = useState<number | undefined>();
   const [dimC, setDimC] = useState<number | undefined>();
@@ -196,6 +250,9 @@ export function SaveAsWizardDialog({
     setStep(1);
     setNewProductName("");
     setNameError("");
+    setCategory("");
+    setSubcategory("");
+    setCategoryError("");
     setDimA(undefined);
     setDimB(undefined);
     setDimC(undefined);
@@ -260,6 +317,8 @@ export function SaveAsWizardDialog({
         return;
       }
       setNameError("");
+      if (!category) { setCategoryError("Category is required"); return; }
+      setCategoryError("");
     }
     if (step === 2 && selectedItems.length === 0) return;
     setStep((s) => (Math.min(4, s + 1) as 1 | 2 | 3 | 4));
@@ -311,6 +370,8 @@ export function SaveAsWizardDialog({
         dimC,
         requiredUnitType,
         baseRequiredQty,
+        category,
+        subcategory,
       }
     };
     onSubmit(payload);
@@ -341,17 +402,103 @@ export function SaveAsWizardDialog({
         </div>
 
         {step === 1 && (
-          <div className="space-y-3 mt-4">
-            <Label htmlFor="new-product-name" className="text-sm font-bold uppercase text-slate-500">Product Name</Label>
-            <Input
-              id="new-product-name"
-              placeholder="e.g. ABC Panelling Premium"
-              className="h-12 text-lg font-bold border-2 border-slate-200 focus-visible:border-primary"
-              value={newProductName}
-              onChange={(e) => { setNewProductName(e.target.value); setNameError(""); }}
-              autoFocus
-            />
-            {nameError && <p className="text-sm text-red-600 font-bold">{nameError}</p>}
+          <div className="space-y-5 mt-4">
+            <div className="space-y-3">
+              <Label htmlFor="new-product-name" className="text-sm font-bold uppercase text-slate-500">Product Name</Label>
+              <Input
+                id="new-product-name"
+                placeholder="e.g. ABC Panelling Premium"
+                className="h-12 text-lg font-bold border-2 border-slate-200 focus-visible:border-primary"
+                value={newProductName}
+                onChange={(e) => { setNewProductName(e.target.value); setNameError(""); }}
+                autoFocus
+              />
+              {nameError && <p className="text-sm text-red-600 font-bold">{nameError}</p>}
+            </div>
+
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label className="text-sm font-bold uppercase text-slate-500">Category</Label>
+                <Popover open={categoryOpen} onOpenChange={setCategoryOpen}>
+                  <PopoverTrigger asChild>
+                    <Button
+                      variant="outline"
+                      role="combobox"
+                      disabled={loadingCategories}
+                      className="h-11 w-full justify-between font-bold border-2 border-slate-200"
+                    >
+                      <span className={category ? "" : "text-slate-400 font-normal"}>
+                        {category || (loadingCategories ? "Loading..." : "Select category")}
+                      </span>
+                      <ChevronsUpDown className="h-4 w-4 opacity-50" />
+                    </Button>
+                  </PopoverTrigger>
+                  <PopoverContent style={{ width: "var(--radix-popover-trigger-width)" }} className="p-0" align="start" side="bottom">
+                    <Command shouldFilter={false}>
+                      <CommandInput placeholder="Search category..." value={categorySearch} onValueChange={setCategorySearch} />
+                      <CommandList className="max-h-[200px]">
+                        <CommandEmpty>No categories found.</CommandEmpty>
+                        <CommandGroup>
+                          {categories
+                            .filter(c => c.toLowerCase().includes(categorySearch.toLowerCase()))
+                            .map((c) => (
+                              <CommandItem
+                                key={c}
+                                value={c}
+                                onSelect={() => { setCategory(c); setSubcategory(""); setCategoryError(""); setCategoryOpen(false); setCategorySearch(""); }}
+                              >
+                                <Check className={`mr-2 h-4 w-4 ${category === c ? "opacity-100" : "opacity-0"}`} />
+                                {c}
+                              </CommandItem>
+                            ))}
+                        </CommandGroup>
+                      </CommandList>
+                    </Command>
+                  </PopoverContent>
+                </Popover>
+              </div>
+              <div className="space-y-2">
+                <Label className="text-sm font-bold uppercase text-slate-500">Subcategory</Label>
+                <Popover open={subcategoryOpen} onOpenChange={setSubcategoryOpen}>
+                  <PopoverTrigger asChild>
+                    <Button
+                      variant="outline"
+                      role="combobox"
+                      disabled={!category || loadingSubcategories}
+                      className="h-11 w-full justify-between font-bold border-2 border-slate-200"
+                    >
+                      <span className={subcategory ? "" : "text-slate-400 font-normal"}>
+                        {subcategory || (!category ? "Select category first" : loadingSubcategories ? "Loading..." : subcategories.length === 0 ? "No subcategories" : "Select subcategory")}
+                      </span>
+                      <ChevronsUpDown className="h-4 w-4 opacity-50" />
+                    </Button>
+                  </PopoverTrigger>
+                  <PopoverContent style={{ width: "var(--radix-popover-trigger-width)" }} className="p-0" align="start" side="bottom">
+                    <Command shouldFilter={false}>
+                      <CommandInput placeholder="Search subcategory..." value={subcategorySearch} onValueChange={setSubcategorySearch} />
+                      <CommandList className="max-h-[200px]">
+                        <CommandEmpty>No subcategories found.</CommandEmpty>
+                        <CommandGroup>
+                          {subcategories
+                            .filter(s => s.toLowerCase().includes(subcategorySearch.toLowerCase()))
+                            .map((s) => (
+                              <CommandItem
+                                key={s}
+                                value={s}
+                                onSelect={() => { setSubcategory(s); setSubcategoryOpen(false); setSubcategorySearch(""); }}
+                              >
+                                <Check className={`mr-2 h-4 w-4 ${subcategory === s ? "opacity-100" : "opacity-0"}`} />
+                                {s}
+                              </CommandItem>
+                            ))}
+                        </CommandGroup>
+                      </CommandList>
+                    </Command>
+                  </PopoverContent>
+                </Popover>
+              </div>
+            </div>
+            {categoryError && <p className="text-sm text-red-600 font-bold">{categoryError}</p>}
           </div>
         )}
 
@@ -422,16 +569,16 @@ export function SaveAsWizardDialog({
 
                 <div className="flex items-center gap-3">
                   <label className="flex items-center gap-2 text-xs font-bold text-indigo-700 cursor-pointer">
-                    <Checkbox 
+                    <Checkbox
                       className="border-indigo-400 data-[state=checked]:bg-indigo-600 data-[state=checked]:border-indigo-600"
-                      checked={bulkSelected.size === selectedItems.length && selectedItems.length > 0} 
+                      checked={bulkSelected.size === selectedItems.length && selectedItems.length > 0}
                       onCheckedChange={(checked) => {
                         if (checked) {
                           setBulkSelected(new Set(selectedItems.map(it => it.index)));
                         } else {
                           setBulkSelected(new Set());
                         }
-                      }} 
+                      }}
                     />
                     <span className="uppercase text-[10px]">Select All</span>
                   </label>
@@ -456,9 +603,9 @@ export function SaveAsWizardDialog({
                 const cfg = configByIndex[it.index];
                 return (
                   <div key={it.index} className="px-3 py-2 flex items-center gap-3 hover:bg-slate-50 transition-colors">
-                    <Checkbox 
-                      className="h-4 w-4 border-2" 
-                      checked={bulkSelected.has(it.index)} 
+                    <Checkbox
+                      className="h-4 w-4 border-2"
+                      checked={bulkSelected.has(it.index)}
                       onCheckedChange={(checked) => {
                         setBulkSelected(prev => {
                           const next = new Set(prev);
@@ -500,6 +647,8 @@ export function SaveAsWizardDialog({
             <div className="grid grid-cols-2 gap-4 text-sm bg-indigo-50/50 p-4 rounded-xl border-2 border-indigo-100">
               <div><span className="text-indigo-400 text-xs uppercase font-black tracking-wider">Source Product</span><div className="font-bold text-slate-700 text-base">{sourceProductName}</div></div>
               <div><span className="text-indigo-400 text-xs uppercase font-black tracking-wider">New Product</span><div className="font-bold text-slate-900 text-base">{newProductName}</div></div>
+              <div><span className="text-indigo-400 text-xs uppercase font-black tracking-wider">Category</span><div className="font-bold text-slate-700 text-base">{category || "-"}</div></div>
+              <div><span className="text-indigo-400 text-xs uppercase font-black tracking-wider">Subcategory</span><div className="font-bold text-slate-700 text-base">{subcategory || "-"}</div></div>
             </div>
             <div className="rounded-xl border-2 border-slate-200 divide-y flex-1 overflow-y-auto bg-white shadow-inner min-h-0">
               {computedResults.map(({ item, line }) => (

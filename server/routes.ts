@@ -8839,6 +8839,10 @@ export async function registerRoutes(
           res.status(400).json({ message: "newProductName is required for Save As" });
           return;
         }
+        if (type === "save_as" && !productConfig?.category) {
+          res.status(400).json({ message: "Category is required for Save As" });
+          return;
+        }
 
         const boqRes = await query(
           `SELECT id, project_id, version_id, table_data FROM boq_items WHERE id = $1`,
@@ -8951,13 +8955,30 @@ export async function registerRoutes(
     async (req: Request, res: Response) => {
       try {
         const { status } = req.query;
-        let sql = `SELECT * FROM boq_manual_item_requests`;
+        // LEFT JOIN the source product card so the approvals UI can show the
+        // FULL existing product (all its items) alongside the newly added
+        // ones, instead of only the newly submitted items in isolation.
+        // Fetch the global product items as well so the UI can show the full original product
+        // alongside the new items, not just the subset of items that happened to be in the BOQ.
+        let sql = `
+          SELECT 
+            r.*, 
+            b.table_data AS source_table_data,
+            (
+              SELECT json_agg(si.*)
+              FROM step11_products sp
+              JOIN step11_product_items si ON si.step11_product_id = sp.id
+              WHERE sp.product_id::text = (b.table_data->>'product_id')::text
+            ) AS global_product_items
+          FROM boq_manual_item_requests r 
+          LEFT JOIN boq_items b ON b.id::text = r.boq_item_id::text
+        `;
         const params: any[] = [];
         if (status && status !== "all") {
           params.push(status);
-          sql += ` WHERE status = $${params.length}`;
+          sql += ` WHERE r.status = $${params.length}`;
         }
-        sql += ` ORDER BY created_at DESC`;
+        sql += ` ORDER BY r.created_at DESC`;
         const result = await query(sql, params);
         res.json({ requests: result.rows });
       } catch (err) {
@@ -8974,7 +8995,23 @@ export async function registerRoutes(
     async (req: Request, res: Response) => {
       try {
         const { id } = req.params;
-        const result = await query(`SELECT * FROM boq_manual_item_requests WHERE id = $1`, [id]);
+        const result = await query(
+          `
+          SELECT 
+            r.*, 
+            b.table_data AS source_table_data,
+            (
+              SELECT json_agg(si.*)
+              FROM step11_products sp
+              JOIN step11_product_items si ON si.step11_product_id = sp.id
+              WHERE sp.product_id::text = (b.table_data->>'product_id')::text
+            ) AS global_product_items
+          FROM boq_manual_item_requests r 
+          LEFT JOIN boq_items b ON b.id::text = r.boq_item_id::text 
+          WHERE r.id = $1
+          `,
+          [id]
+        );
         if (result.rowCount === 0) {
           res.status(404).json({ message: "Request not found" });
           return;
@@ -9129,8 +9166,9 @@ export async function registerRoutes(
 
           const newTableData = {
             product_name: request.new_product_name,
-            category: tableData.category || "General",
-            category_name: tableData.category_name || tableData.category || "General",
+            category: productConfig.category || tableData.category || "General",
+            category_name: productConfig.category || tableData.category_name || tableData.category || "General",
+            subcategory: productConfig.subcategory || null,
             step11_items: newItems,
             configBasis,
             materialLines,
@@ -9140,7 +9178,11 @@ export async function registerRoutes(
             save_as_request_id: id,
           };
 
-          // 1. Get or Create global product in Product Library
+          // 1. Get or Create global product in Product Library, using the
+          // category/subcategory chosen in the Save As wizard (falls back to
+          // the source product's category if none was picked for some reason).
+          const chosenCategory = productConfig.category || tableData.category || null;
+          const chosenSubcategory = productConfig.subcategory || null;
           let globalProductId: string;
           const existingProductRes = await query(
             `SELECT id FROM products WHERE LOWER(TRIM(name)) = LOWER(TRIM($1)) LIMIT 1`,
@@ -9149,10 +9191,16 @@ export async function registerRoutes(
 
           if (existingProductRes.rowCount && existingProductRes.rowCount > 0) {
             globalProductId = existingProductRes.rows[0].id;
+            // Keep the product's category/subcategory in sync with what was
+            // chosen for this Save As request (only overwrites when provided).
+            await query(
+              `UPDATE products SET category = COALESCE($1, category), subcategory = COALESCE($2, subcategory) WHERE id = $3`,
+              [chosenCategory, chosenSubcategory, globalProductId]
+            );
           } else {
             const productResult = await query(
-              `INSERT INTO products (name, category, created_by) VALUES ($1, $2, $3) RETURNING id`,
-              [request.new_product_name, tableData.category || null, approvedByName]
+              `INSERT INTO products (name, category, subcategory, created_by) VALUES ($1, $2, $3, $4) RETURNING id`,
+              [request.new_product_name, chosenCategory, chosenSubcategory, approvedByName]
             );
             globalProductId = productResult.rows[0].id;
           }
@@ -9168,13 +9216,15 @@ export async function registerRoutes(
           }
 
           const step11ProductResult = await query(
-            `INSERT INTO step11_products (product_id, product_name, config_name, total_cost, required_unit_type, base_required_qty, wastage_pct_default, dim_a, dim_b, dim_c, created_at, updated_at)
-             VALUES ($1, $2, $3, $4, $5, $6, 0, $7, $8, $9, NOW(), NOW())
+            `INSERT INTO step11_products (product_id, product_name, config_name, category_id, subcategory_id, total_cost, required_unit_type, base_required_qty, wastage_pct_default, dim_a, dim_b, dim_c, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 0, $9, $10, $11, NOW(), NOW())
              RETURNING id`,
             [
               globalProductId,
               request.new_product_name,
               `Save As Config - ${id.substring(0, 8)}`,
+              chosenCategory,
+              chosenSubcategory,
               totalCost,
               configBasis?.requiredUnitType || 'Sqft',
               configBasis?.baseRequiredQty || 1,
@@ -9217,14 +9267,16 @@ export async function registerRoutes(
           const configNameForApproval = `Save As Config - ${id.substring(0, 8)}`;
           await query(
             `INSERT INTO product_approvals (
-              product_id, product_name, config_name, total_cost,
+              product_id, product_name, config_name, category_id, subcategory_id, total_cost,
               required_unit_type, base_required_qty, wastage_pct_default,
               dim_a, dim_b, dim_c, status, created_by, created_at, updated_at
-            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'approved',$11,NOW(),NOW())`,
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'approved',$13,NOW(),NOW())`,
             [
               globalProductId,
               request.new_product_name,
               configNameForApproval,
+              chosenCategory,
+              chosenSubcategory,
               totalCost,
               configBasis?.requiredUnitType || 'Sqft',
               configBasis?.baseRequiredQty || 1,

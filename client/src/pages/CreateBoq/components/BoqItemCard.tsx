@@ -659,16 +659,18 @@ export const BoqItemCard = React.memo(function BoqItemCard({ boqItem, boqIdx, is
                 <Button variant="outline" size="sm" className="h-7 text-xs font-bold border-slate-300 shadow-sm" disabled={isVersionSubmitted} onClick={() => onSaveAsTemplate?.(boqItem)}>Save as Template</Button>
                 {pendingManualItems.length > 0 && !isVersionSubmitted && (
                   <>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      className="h-7 text-xs font-bold border-emerald-300 text-emerald-700 bg-emerald-50 hover:bg-emerald-100 shadow-sm"
-                      title={`Add ${pendingManualItems.length} newly added manual item(s) to this product (requires approval)`}
-                      onClick={() => setShowSaveConfirm(true)}
-                    >
-                      <Save className="h-3.5 w-3.5 mr-1" />
-                      Save ({pendingManualItems.length})
-                    </Button>
+                    {pendingManualItems.length < step11Items.length && (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="h-7 text-xs font-bold border-emerald-300 text-emerald-700 bg-emerald-50 hover:bg-emerald-100 shadow-sm"
+                        title={`Add ${pendingManualItems.length} newly added manual item(s) to this product (requires approval)`}
+                        onClick={() => setShowSaveConfirm(true)}
+                      >
+                        <Save className="h-3.5 w-3.5 mr-1" />
+                        Save ({pendingManualItems.length})
+                      </Button>
+                    )}
                     <Button
                       variant="outline"
                       size="sm"
