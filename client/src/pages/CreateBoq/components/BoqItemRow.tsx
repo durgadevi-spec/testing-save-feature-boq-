@@ -42,7 +42,7 @@ import { Project, BOMVersion, BOMItem, Product, Step11Item, BOMHistory, BOMComme
 import { parseTableData, parseImages, safeJson, VERSION_LABEL } from '../utils';
 import { ChangeShopRateDialog } from './ChangeShopRateDialog';
 
-export const BoqItemRow = React.memo(function BoqItemRow({ item, itemIdx, boqItem, tableData, isEngineBased, isVersionSubmitted, getEditedValue, updateEditedField, handleDeleteRow, checkBudgetEarly, handleSaveProject, isDraggable, isDragOver, onDragStart, onDragOver, onDrop, mismatch, isCompactView, comments, users, currentUser, onAddComment, selectedVersionId, isBifProd, totalItems, onOrdinalChange, amendRatesActive, onBomShopRateSubmitted, bomShopRateRequests }: {
+export const BoqItemRow = React.memo(function BoqItemRow({ item, itemIdx, boqItem, tableData, isEngineBased, isVersionSubmitted, getEditedValue, updateEditedField, handleDeleteRow, checkBudgetEarly, handleSaveProject, isDraggable, isDragOver, onDragStart, onDragOver, onDrop, mismatch, isCompactView, comments, users, currentUser, onAddComment, selectedVersionId, isBifProd, totalItems, onOrdinalChange, amendRatesActive, onBomShopRateSubmitted, bomShopRateRequests, bomButtonsEnabled }: {
   item: any; itemIdx: number; boqItem: BOMItem; tableData: any; isEngineBased: boolean; isVersionSubmitted: boolean;
   getEditedValue: (k: string, f: string, v: any) => any;
   updateEditedField: (k: string, f: string, v: any) => void;
@@ -67,6 +67,7 @@ export const BoqItemRow = React.memo(function BoqItemRow({ item, itemIdx, boqIte
   amendRatesActive?: boolean;
   onBomShopRateSubmitted?: () => void;
   bomShopRateRequests?: any[];
+  bomButtonsEnabled?: boolean;
 }) {
   const { toast } = useToast();
   const itemKey = item.itemKey || `${boqItem.id}-manual-${itemIdx}`;

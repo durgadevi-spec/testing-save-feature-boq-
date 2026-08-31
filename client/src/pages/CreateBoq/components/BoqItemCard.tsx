@@ -88,10 +88,26 @@ export const BoqItemCard = React.memo(function BoqItemCard({ boqItem, boqIdx, is
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
   const [amendRatesActive, setAmendRatesActive] = useState(false);
   const [showNotes, setShowNotes] = useState(false);
+  const [deletedFromBom, setDeletedFromBom] = useState<any[]>([]);
+
+  const handleCardDeleteRow = (id: string, td: any, idx: number, item?: any) => {
+    if (item) {
+      const trackIdx = item._s11Idx !== undefined ? item._s11Idx : item.index;
+      if (trackIdx >= 0) {
+        setDeletedFromBom(prev => {
+          const itemTrackIdx = trackIdx;
+          if (prev.some(i => (i._s11Idx !== undefined ? i._s11Idx : i.index) === itemTrackIdx)) return prev;
+          return [...prev, item];
+        });
+      }
+    }
+    handleDeleteRow(id, td, idx, item);
+  };
   const [localRemarks, setLocalRemarks] = useState(tableData.remarks || "");
 
   // ── Save / Save As (new manual items → existing product, additive) ─────
   const [showSaveConfirm, setShowSaveConfirm] = useState(false);
+  const [showSaveEditWizard, setShowSaveEditWizard] = useState(false);
   const [showSaveAsWizard, setShowSaveAsWizard] = useState(false);
   const [isSubmittingSave, setIsSubmittingSave] = useState(false);
 
@@ -136,6 +152,47 @@ export const BoqItemCard = React.memo(function BoqItemCard({ boqItem, boqIdx, is
     } catch (err) {
       console.error("Failed to submit Save request", err);
       toast({ title: "Error", description: "Failed to submit items for approval.", variant: "destructive" });
+    } finally {
+      setIsSubmittingSave(false);
+    }
+  };
+
+  // ── Save (full edit): bundle added / edited / deleted materials on THIS
+  // existing product into one approval request. Unlike handleConfirmSave
+  // above (additive-only), this lets the user also edit or remove existing
+  // materials — nothing changes on the live product until an admin
+  // approves the request. ──────────────────────────────────────────────
+  const handleSubmitSaveEdit = async (payload: { addedIndexes: number[]; deletedIndexes: number[]; editedItems: { index: number; patch: any }[] }) => {
+    if (isSubmittingSave) return;
+    const { addedIndexes, deletedIndexes, editedItems } = payload;
+    const totalChanges = addedIndexes.length + deletedIndexes.length + editedItems.length;
+    if (totalChanges === 0) {
+      toast({ title: "No changes", description: "Nothing was added, edited, or deleted." });
+      return;
+    }
+    setIsSubmittingSave(true);
+    try {
+      const res = await apiFetch("/api/boq-manual-item-requests", {
+        method: "POST",
+        body: JSON.stringify({
+          type: "save",
+          fullEdit: true,
+          boqItemId: boqItem.id,
+          addedIndexes,
+          deletedIndexes,
+          editedItems,
+        }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      const data = await res.json();
+      if (data?.table_data) {
+        setBoqItems((prev) => prev.map((i) => (i.id === boqItem.id ? { ...i, table_data: data.table_data } : i)));
+      }
+      toast({ title: "Submitted for Approval", description: `${totalChanges} change(s) submitted for ${productName}.` });
+      setShowSaveEditWizard(false);
+    } catch (err) {
+      console.error("Failed to submit Save request", err);
+      toast({ title: "Error", description: "Failed to submit changes for approval.", variant: "destructive" });
     } finally {
       setIsSubmittingSave(false);
     }
@@ -666,25 +723,25 @@ export const BoqItemCard = React.memo(function BoqItemCard({ boqItem, boqIdx, is
                   Analysis
                 </Button>
                 <Button variant="outline" size="sm" className="h-7 text-xs font-bold border-slate-300 shadow-sm" disabled={isVersionSubmitted} onClick={() => onSaveAsTemplate?.(boqItem)}>Save as Template</Button>
-                {pendingManualItems.length > 0 && !isVersionSubmitted && (
+                {(!isVersionSubmitted && (bomButtonsEnabled || pendingManualItems.length > 0)) && (
                   <>
                     {!isLooseItem && (
                       <Button
                         variant="outline"
                         size="sm"
                         className="h-7 text-xs font-bold border-emerald-300 text-emerald-700 bg-emerald-50 hover:bg-emerald-100 shadow-sm"
-                        title={`Add ${pendingManualItems.length} newly added manual item(s) to this product (requires approval)`}
-                        onClick={() => setShowSaveConfirm(true)}
+                        title={pendingManualItems.length > 0 ? `Add ${pendingManualItems.length} newly added manual item(s) to this product (requires approval)` : "Edit product and submit changes for approval"}
+                        onClick={() => setShowSaveEditWizard(true)}
                       >
                         <Save className="h-3.5 w-3.5 mr-1" />
-                        Save ({pendingManualItems.length})
+                        Save {pendingManualItems.length > 0 ? `(${pendingManualItems.length})` : ""}
                       </Button>
                     )}
                     <Button
                       variant="outline"
                       size="sm"
                       className="h-7 text-xs font-bold border-indigo-300 text-indigo-700 bg-indigo-50 hover:bg-indigo-100 shadow-sm"
-                      title="Use these newly added manual items to create a new product (requires approval)"
+                      title={pendingManualItems.length > 0 ? "Use these newly added manual items to create a new product (requires approval)" : "Use this product as a base to create a new product (requires approval)"}
                       onClick={() => setShowSaveAsWizard(true)}
                     >
                       Save As
@@ -859,9 +916,9 @@ export const BoqItemCard = React.memo(function BoqItemCard({ boqItem, boqIdx, is
                         key={item.itemKey || `${boqItem.id}-${item.originalIdx}`}
                         item={item} itemIdx={item.originalIdx} boqItem={boqItem}
                         tableData={tableData} isEngineBased={isEngineBased} isVersionSubmitted={isVersionSubmitted}
-                        amendRatesActive={amendRatesActive}
+                        amendRatesActive={amendRatesActive} bomButtonsEnabled={bomButtonsEnabled}
                         getEditedValue={getEditedValue} updateEditedField={updateEditedField}
-                        handleDeleteRow={handleDeleteRow} checkBudgetEarly={checkBudgetEarly}
+                        handleDeleteRow={handleCardDeleteRow} checkBudgetEarly={checkBudgetEarly}
                         handleSaveProject={handleSaveProject}
                         isDraggable={!isVersionSubmitted && !tableData.is_finalized}
                         isDragOver={dragOverIdx === item.originalIdx}
@@ -961,10 +1018,24 @@ export const BoqItemCard = React.memo(function BoqItemCard({ boqItem, boqIdx, is
         onConfirm={handleConfirmSave}
       />
       <SaveAsWizardDialog
+        mode="save"
+        open={showSaveEditWizard}
+        onOpenChange={setShowSaveEditWizard}
+        sourceProductName={productName}
+        items={[...renderLines, ...deletedFromBom].map((it: any, index: number) => ({ ...it, index: it._s11Idx !== undefined ? it._s11Idx : index })) as PendingManualItem[]}
+        preDeletedIndexes={deletedFromBom.map(i => i._s11Idx !== undefined ? i._s11Idx : i.index)}
+        isSubmitting={isSubmittingSave}
+        existingProductNames={existingProductNamesInVersion}
+        onSubmit={() => { }}
+        onSubmitSave={handleSubmitSaveEdit}
+      />
+      <SaveAsWizardDialog
+        mode="save_as"
         open={showSaveAsWizard}
         onOpenChange={setShowSaveAsWizard}
         sourceProductName={productName}
-        items={renderLines.map((it: any, index: number) => ({ ...it, index })) as PendingManualItem[]}
+        items={[...renderLines, ...deletedFromBom].map((it: any, index: number) => ({ ...it, index: it._s11Idx !== undefined ? it._s11Idx : index })) as PendingManualItem[]}
+        preDeletedIndexes={deletedFromBom.map(i => i._s11Idx !== undefined ? i._s11Idx : i.index)}
         isSubmitting={isSubmittingSave}
         existingProductNames={existingProductNamesInVersion}
         onSubmit={handleSubmitSaveAs}

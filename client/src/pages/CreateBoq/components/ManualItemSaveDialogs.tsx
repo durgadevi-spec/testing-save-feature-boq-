@@ -154,6 +154,9 @@ export function SaveAsWizardDialog({
   isSubmitting,
   existingProductNames,
   onSubmit,
+  mode = "save_as",
+  onSubmitSave,
+  preDeletedIndexes,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -162,8 +165,28 @@ export function SaveAsWizardDialog({
   isSubmitting: boolean;
   existingProductNames: string[];
   onSubmit: (payload: { newProductName: string; selectedIndexes: number[]; items: any[]; calculatedResults: any; productConfig?: any; description?: string }) => void;
+  /** "save_as" (default, unchanged): build a brand-new product from the
+   * selected items. "save": edit THIS existing product in place — skips
+   * the product-name step, and adds a delete toggle so existing materials
+   * can be removed (not just new ones added), all submitted together for
+   * approval. */
+  mode?: "save_as" | "save";
+  onSubmitSave?: (payload: { addedIndexes: number[]; deletedIndexes: number[]; editedItems: { index: number; patch: any }[] }) => void;
+  preDeletedIndexes?: number[];
 }) {
-  const [step, setStep] = useState<1 | 2>(1);
+  const [step, setStep] = useState<1 | 2>(mode === "save" ? 2 : 1);
+  // ── Save mode only: existing materials marked for removal. They stay
+  // visible in the table (styled red / struck-through) rather than
+  // disappearing, so the admin approval view can show a clear diff. ──
+  const [deletedIndexes, setDeletedIndexes] = useState<Set<number>>(new Set());
+
+  // Re-initialize when opened
+  useEffect(() => {
+    if (open) {
+      setStep(mode === "save" ? 2 : 1);
+      setDeletedIndexes(new Set(preDeletedIndexes || []));
+    }
+  }, [open, mode, preDeletedIndexes]);
   const [newProductName, setNewProductName] = useState("");
   const [nameError, setNameError] = useState("");
   const [configByIndex, setConfigByIndex] = useState<Record<number, ItemConfig>>({});
@@ -233,9 +256,38 @@ export function SaveAsWizardDialog({
   const [baseRequiredQty, setBaseRequiredQty] = useState(1);
   const [wastagePctDefault, setWastagePctDefault] = useState(0);
 
-  const [bulkSelected, setBulkSelected] = useState<Set<number>>(new Set());
-  const [bulkQty, setBulkQty] = useState<string>("");
-  const [bulkWastage, setBulkWastage] = useState<string>("");
+  // ── Unit Type options — mirrors Manage Product's Step 3 "Unit Type"
+  // dropdown exactly: same defaults + any additional units found on
+  // materials in the catalog, deduped and sorted. ──
+  const [unitTypeMaterials, setUnitTypeMaterials] = useState<any[]>([]);
+  useEffect(() => {
+    if (!open || unitTypeMaterials.length > 0) return;
+    (async () => {
+      try {
+        const res = await apiFetch("/api/materials");
+        if (res.ok) {
+          const d = await res.json();
+          setUnitTypeMaterials(Array.isArray(d) ? d : (d.materials || []));
+        }
+      } catch (err) {
+        console.error("Failed to load materials for unit types:", err);
+      }
+    })();
+  }, [open]);
+
+  const availableUnitTypes = useMemo(() => {
+    const defaults = ["Sqft", "Sqmt", "Length", "LS", "RFT", "RMT"];
+    const finalUnits = [...defaults];
+    (unitTypeMaterials || []).map((m: any) => m.unit?.trim()).filter(Boolean).forEach((u: string) => {
+      const lowerU = u.toLowerCase();
+      const isSqftVariant = lowerU === "sft" || lowerU === "sqft";
+      const hasSqftVariant = finalUnits.some(fu => { const lfu = fu.toLowerCase(); return lfu === "sft" || lfu === "sqft"; });
+      if (isSqftVariant && hasSqftVariant) return;
+      if (!finalUnits.some(fu => fu.toLowerCase() === lowerU)) finalUnits.push(u);
+    });
+    return finalUnits.sort();
+  }, [unitTypeMaterials]);
+
   const [addItemOpen, setAddItemOpen] = useState(false);
 
   // ── Add Item (master catalog) — mirrors Manage Product's "Add Additional
@@ -304,23 +356,6 @@ export function SaveAsWizardDialog({
     }));
   };
 
-  const applyBulkEdit = () => {
-    if (bulkSelected.size === 0) return;
-    setConfigByIndex(prev => {
-      const next = { ...prev };
-      bulkSelected.forEach(idx => {
-        if (next[idx]) {
-          next[idx] = { ...next[idx] };
-          if (bulkQty.trim() !== "") next[idx].qty = Number(bulkQty) || 0;
-          if (bulkWastage.trim() !== "") next[idx].wastagePct = Number(bulkWastage) || 0;
-        }
-      });
-      return next;
-    });
-    setBulkQty("");
-    setBulkWastage("");
-    setBulkSelected(new Set()); // clear selection after apply
-  };
 
   useEffect(() => {
     if (dimA !== undefined || dimB !== undefined || dimC !== undefined) {
@@ -336,7 +371,8 @@ export function SaveAsWizardDialog({
     if (!open) { prevOpenRef.current = false; return; }
     if (prevOpenRef.current) return;          // already open — skip reset
     prevOpenRef.current = true;
-    setStep(1);
+    setStep(mode === "save" ? 2 : 1);
+    setDeletedIndexes(new Set());
     setNewProductName("");
     setNameError("");
     setCategory("");
@@ -351,9 +387,6 @@ export function SaveAsWizardDialog({
     setWastagePctDefault(0);
     setIsMaximized(true);
     setIsCompactView(false);
-    setBulkSelected(new Set());
-    setBulkQty("");
-    setBulkWastage("");
     setExtraItems([]);
     nextExtraIndexRef.current = -1;
     setAvailableMaterials([]);
@@ -511,6 +544,78 @@ export function SaveAsWizardDialog({
     onSubmit(payload);
   };
 
+  // ── Save mode: submit added / edited / deleted materials on THIS
+  // existing product for approval (no new product is created). ──────────
+  const handleSubmitSaveEdit = () => {
+    if (!onSubmitSave) return;
+    const addedIdx: number[] = [];
+    const editedItemsOut: { index: number; patch: any }[] = [];
+
+    computedResults.forEach(({ item, cfg }) => {
+      // Skip engine/materialLine items — they live in tableData.materialLines,
+      // not step11_items, so the server's fullEdit branch can't address them.
+      const isEngineLine = (item as any)._materialIdx !== undefined && (item as any)._s11Idx === undefined;
+      if (isEngineLine) return;
+
+      const isFreshAdd = item.manual === true && !item.manualApproval;
+      
+      // If deleted, we don't need to add it to editedItems or addedIdx.
+      // deletedIndexes is passed separately.
+      if (deletedIndexes.has(item.index)) {
+        if (isFreshAdd) {
+          // If it's a fresh add AND deleted before approval, we should still
+          // tell the backend it's deleted (so it gets removed from step11_items).
+        }
+        return; 
+      }
+      
+      if (isFreshAdd) {
+        addedIdx.push(item.index);
+      }
+      // Existing item (or fresh add) — compare against its original persisted values to
+      // detect an edit worth submitting.
+      const origQty = Number((item as any).qtyPerSqf ?? item.qty ?? 0) || 0;
+      const origWastage = Number((item as any).wastagePct) || 0;
+      const origSupply = Number((item as any).supply_rate ?? (item as any).supplyRate ?? 0) || 0;
+      const origInstall = Number((item as any).install_rate ?? (item as any).installRate ?? 0) || 0;
+      const origFreeze = !!((item as any).freezeAndEdit || (item as any).freeze_and_edit);
+      const origApplyWastage = (item as any).applyWastage !== false;
+      const origApplyRounding = (item as any).applyRounding !== false;
+      const origDescription = (item as any).description || (item as any).title || "";
+      const changed = cfg.qty !== origQty || cfg.wastagePct !== origWastage || cfg.supplyRate !== origSupply
+        || cfg.installRate !== origInstall || cfg.freezeAndEdit !== origFreeze || cfg.applyWastage !== origApplyWastage
+        || cfg.applyRounding !== origApplyRounding || (cfg.description || "") !== origDescription;
+      
+      if (changed) {
+        editedItemsOut.push({
+          index: item.index,
+          patch: {
+            qty: cfg.qty,
+            qtyPerSqf: cfg.qty,
+            baseQty: cfg.qty,
+            wastagePct: cfg.wastagePct,
+            freezeAndEdit: cfg.freezeAndEdit,
+            applyWastage: cfg.applyWastage,
+            applyRounding: cfg.applyRounding,
+            supply_rate: cfg.supplyRate,
+            install_rate: cfg.installRate,
+            supplyRate: cfg.supplyRate,
+            installRate: cfg.installRate,
+            description: cfg.description || origDescription,
+          },
+        });
+      }
+    });
+
+    // Filter deletedIndexes to only include step11 items (not engine/materialLine items)
+    const step11DeletedIndexes = Array.from(deletedIndexes).filter(idx => {
+      const item = allItems.find(it => it.index === idx);
+      return !item || (item as any)._s11Idx !== undefined;
+    });
+
+    onSubmitSave({ addedIndexes: addedIdx, deletedIndexes: step11DeletedIndexes, editedItems: editedItemsOut });
+  };
+
   const stepLabels = ["Product Name", "Configuration"];
 
   const wizardDialogRef = useRef<HTMLDivElement>(null);
@@ -542,8 +647,8 @@ export function SaveAsWizardDialog({
                 <Layers className="h-6 w-6" />
               </div>
               <div>
-                <h3 className="text-xs font-bold text-muted-foreground uppercase tracking-widest mb-1">Configuration For</h3>
-                <p className="text-2xl font-extrabold text-slate-900">{newProductName || "New Product"}</p>
+                <h3 className="text-xs font-bold text-muted-foreground uppercase tracking-widest mb-1">{mode === "save" ? "Editing Product" : "Configuration For"}</h3>
+                <p className="text-2xl font-extrabold text-slate-900">{mode === "save" ? sourceProductName : (newProductName || "New Product")}</p>
               </div>
             </div>
             <div className="flex flex-col md:flex-row items-center md:items-end gap-8">
@@ -573,14 +678,23 @@ export function SaveAsWizardDialog({
           </div>
         )}
 
-        <div className="flex items-center gap-2 text-sm font-bold text-slate-400 mb-2 shrink-0">
-          {stepLabels.map((label, i) => (
-            <React.Fragment key={label}>
-              <span className={i + 1 === step ? "text-primary" : i + 1 < step ? "text-slate-600" : ""}>{i + 1}. {label}</span>
-              {i < stepLabels.length - 1 && <span className="text-slate-300">›</span>}
-            </React.Fragment>
-          ))}
-        </div>
+        {mode !== "save" && (
+          <div className="flex items-center gap-2 text-sm font-bold text-slate-400 mb-2 shrink-0">
+            {stepLabels.map((label, i) => (
+              <React.Fragment key={label}>
+                <span className={i + 1 === step ? "text-primary" : i + 1 < step ? "text-slate-600" : ""}>{i + 1}. {label}</span>
+                {i < stepLabels.length - 1 && <span className="text-slate-300">›</span>}
+              </React.Fragment>
+            ))}
+          </div>
+        )}
+        {mode === "save" && (
+          <div className="flex items-center gap-4 text-[11px] font-bold mb-2 shrink-0">
+            <span className="flex items-center gap-1.5"><span className="h-3 w-3 rounded bg-emerald-50 border border-emerald-200 inline-block" /> New material</span>
+            <span className="flex items-center gap-1.5"><span className="h-3 w-3 rounded bg-red-50 border border-red-200 inline-block" /> Marked for removal</span>
+            <span className="flex items-center gap-1.5"><span className="h-3 w-3 rounded bg-cyan-100 border border-cyan-200 inline-block" /> Freeze & Edit</span>
+          </div>
+        )}
 
         {step === 1 && (
           <div className="space-y-5 mt-4">
@@ -691,14 +805,7 @@ export function SaveAsWizardDialog({
                 <Select value={requiredUnitType} onValueChange={(v) => setRequiredUnitType(v)}>
                   <SelectTrigger className="font-bold"><SelectValue placeholder="Select unit" /></SelectTrigger>
                   <SelectContent className="max-h-[300px] overflow-y-auto">
-                    <SelectItem value="Sqft">Sqft</SelectItem>
-                    <SelectItem value="Rft">Rft</SelectItem>
-                    <SelectItem value="Pcs">Pcs</SelectItem>
-                    <SelectItem value="Nos">Nos</SelectItem>
-                    <SelectItem value="Rmt">Rmt</SelectItem>
-                    <SelectItem value="Cum">Cum</SelectItem>
-                    <SelectItem value="Ltrs">Ltrs</SelectItem>
-                    <SelectItem value="Kgs">Kgs</SelectItem>
+                    {availableUnitTypes.map(u => <SelectItem key={u} value={u}>{u}</SelectItem>)}
                   </SelectContent>
                 </Select>
               </div>
@@ -827,41 +934,6 @@ export function SaveAsWizardDialog({
               </div>
             </div>
 
-            {/* Bulk edit tools (additive — not present in Manage Product, kept for faster multi-row edits) */}
-            {selectedItems.length > 0 && (
-              <div className="rounded-xl border-2 border-indigo-100 bg-indigo-50/50 p-2 px-3 shadow-sm flex flex-col lg:flex-row items-start lg:items-center gap-4">
-                <p className="text-[10px] font-black uppercase text-indigo-400 tracking-wider w-24 shrink-0 leading-tight hidden lg:block">Bulk Edit</p>
-                <div className="flex flex-wrap items-center gap-3">
-                  <label className="flex items-center gap-2 text-xs font-bold text-indigo-700 cursor-pointer">
-                    <Checkbox
-                      className="border-indigo-400 data-[state=checked]:bg-indigo-600 data-[state=checked]:border-indigo-600"
-                      checked={bulkSelected.size === selectedItems.length && selectedItems.length > 0}
-                      onCheckedChange={(checked) => {
-                        if (checked) {
-                          setBulkSelected(new Set(selectedItems.map(it => it.index)));
-                        } else {
-                          setBulkSelected(new Set());
-                        }
-                      }}
-                    />
-                    <span className="uppercase text-[10px]">Select All</span>
-                  </label>
-                  {bulkSelected.size > 0 && (
-                    <>
-                      <div className="h-4 w-px bg-indigo-200 mx-1"></div>
-                      <div className="flex items-center gap-2 animate-in fade-in slide-in-from-left-2 duration-200">
-                        <Input type="number" placeholder="Set Qty" className="h-8 w-20 text-xs font-bold bg-white border-2 border-indigo-200" value={bulkQty} onChange={e => setBulkQty(e.target.value)} />
-                        <Input type="number" placeholder="Set Wastage %" className="h-8 w-28 text-xs font-bold bg-white border-2 border-indigo-200" value={bulkWastage} onChange={e => setBulkWastage(e.target.value)} />
-                        <Button size="sm" className="h-8 text-xs font-bold px-4 bg-indigo-600 hover:bg-indigo-700 text-white" disabled={bulkSelected.size === 0 || (bulkQty === "" && bulkWastage === "")} onClick={applyBulkEdit}>
-                          Apply ({bulkSelected.size})
-                        </Button>
-                      </div>
-                    </>
-                  )}
-                </div>
-              </div>
-            )}
-
             <div className="rounded-xl border shadow-sm overflow-x-auto bg-white min-h-[320px]">
               <Table>
                 <TableHeader className="bg-muted/30 sticky top-0 z-10">
@@ -909,21 +981,54 @@ export function SaveAsWizardDialog({
                         <TableHead className="w-[90px] font-bold">Total Qty</TableHead>
                       </>
                     )}
+                    <TableHead className="w-[80px] font-bold">
+                      <div className="flex flex-col items-center gap-1">
+                        <span className="text-[10px] text-center leading-tight">Freeze &<br />Edit</span>
+                      </div>
+                    </TableHead>
+                    <TableHead className="w-[90px] font-bold">Final Amount</TableHead>
+                    {!isCompactView && <TableHead className="w-[90px] font-bold">Per {requiredUnitType} Qty</TableHead>}
                   </TableRow>
                 </TableHeader>
                 <TableBody>
                   {computedResults.map(({ item: it, cfg, line }, idx) => {
                     const rate = (cfg?.supplyRate || 0) + (cfg?.installRate || 0);
                     const baseAmt = (cfg?.qty || 0) * rate;
+                    const isFreezed = !!cfg?.freezeAndEdit;
+                    const isFreshAdd = mode === "save" && it.manual === true && !it.manualApproval;
+                    const isMarkedDeleted = mode === "save" && deletedIndexes.has(it.index);
+                    const rowClass = isMarkedDeleted
+                      ? "bg-red-50 border-red-200 line-through opacity-60"
+                      : isFreshAdd
+                        ? "bg-emerald-50 border-emerald-200"
+                        : isFreezed
+                          ? "bg-cyan-100 border-cyan-200"
+                          : "bg-white";
                     return (
-                      <TableRow key={it.index} className="hover:bg-muted/5 transition-colors border-b bg-white">
+                      <TableRow key={it.index} className={`hover:bg-muted/5 transition-colors border-b ${rowClass}`}>
                         <TableCell className="text-center cursor-grab active:cursor-grabbing">
                           <GripVertical className="h-4 w-4 text-muted-foreground/40" />
                         </TableCell>
                         <TableCell className="text-center font-medium text-[10px]">{idx + 1}</TableCell>
                         <TableCell className="text-center">
-                          <Button variant="ghost" size="sm" onClick={() => removeItem(it.index)} className="h-6 w-6 p-0 text-red-500 hover:text-red-700 hover:bg-red-50">
-                            <span className="text-xs font-bold">×</span>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            title={isMarkedDeleted ? "Undo delete" : (mode === "save" && it.index >= 0) ? "Delete this material" : "Remove"}
+                            onClick={() => {
+                              if (mode === "save" && it.index >= 0) {
+                                setDeletedIndexes((prev) => {
+                                  const next = new Set(prev);
+                                  if (next.has(it.index)) next.delete(it.index); else next.add(it.index);
+                                  return next;
+                                });
+                              } else {
+                                removeItem(it.index);
+                              }
+                            }}
+                            className={`h-6 w-6 p-0 hover:bg-red-50 ${isMarkedDeleted ? "text-emerald-600 hover:text-emerald-700" : "text-red-500 hover:text-red-700"}`}
+                          >
+                            <span className="text-xs font-bold">{isMarkedDeleted ? "↺" : "×"}</span>
                           </Button>
                         </TableCell>
                         <TableCell className="font-semibold text-[10px] whitespace-nowrap overflow-hidden text-ellipsis max-w-[150px]">
@@ -976,20 +1081,26 @@ export function SaveAsWizardDialog({
                             <TableCell className="text-[10px] font-bold">{(line?.roundOffQty ?? cfg?.qty ?? 0).toFixed(2)}</TableCell>
                           </>
                         )}
+                        <TableCell className="text-center">
+                          <Checkbox checked={!!cfg?.freezeAndEdit} onCheckedChange={(checked) => updateConfig(it.index, { freezeAndEdit: !!checked })} />
+                        </TableCell>
+                        <TableCell className="text-[10px] font-bold text-blue-600">₹{(line?.lineTotal ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</TableCell>
+                        {!isCompactView && <TableCell className="text-[10px] font-bold text-primary">{(line?.perUnitQty ?? 0).toFixed(4)}</TableCell>}
                       </TableRow>
                     );
                   })}
                   {computedResults.length === 0 && (
                     <TableRow>
-                      <TableCell colSpan={isCompactView ? 8 : 15} className="text-center py-6 text-muted-foreground italic">
+                      <TableCell colSpan={isCompactView ? 10 : 18} className="text-center py-6 text-muted-foreground italic">
                         No items selected. Use "+ Add Item" to bring one back.
                       </TableCell>
                     </TableRow>
                   )}
                   {computedResults.length > 0 && (
                     <TableRow className="bg-muted/20 font-black">
-                      <TableCell colSpan={(isCompactView ? 8 : 15) - 1} className="text-right py-3 pr-4">Total (Incl. Wastage)</TableCell>
+                      <TableCell colSpan={isCompactView ? 9 : 16} className="text-right py-3 pr-4">Total (Incl. Wastage)</TableCell>
                       <TableCell className="text-[11px] text-primary">₹{grandTotal.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</TableCell>
+                      {!isCompactView && <TableCell></TableCell>}
                     </TableRow>
                   )}
                 </TableBody>
@@ -1002,7 +1113,7 @@ export function SaveAsWizardDialog({
 
         <DialogFooter className="flex items-center justify-between sm:justify-between pt-2 shrink-0">
           <div>
-            {step > 1 && (
+            {step > 1 && mode !== "save" && (
               <Button variant="outline" onClick={goBack} disabled={isSubmitting}>
                 <ArrowLeft className="h-3.5 w-3.5 mr-1" /> Back
               </Button>
@@ -1013,6 +1124,15 @@ export function SaveAsWizardDialog({
             {step < 2 ? (
               <Button onClick={goNext} disabled={isSubmitting}>
                 Next <ArrowRight className="h-3.5 w-3.5 ml-1" />
+              </Button>
+            ) : mode === "save" ? (
+              <Button
+                onClick={handleSubmitSaveEdit}
+                disabled={isSubmitting}
+                className="bg-primary text-white"
+              >
+                {isSubmitting && <Loader2 className="h-3.5 w-3.5 mr-2 animate-spin" />}
+                Submit for Approval
               </Button>
             ) : (
               <Button onClick={handleSubmit} disabled={isSubmitting || selectedItems.length === 0} className="bg-primary text-white">

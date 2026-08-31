@@ -178,22 +178,54 @@ export default function NewItemsApprovalTab({ canAct }: { canAct: boolean }) {
 
         let mergedItems = [...newItems];
         if (r.type === "save") {
-          mergedItems = [...globalProductItems];
+          // Requests submitted before the add/edit/delete "full edit" Save
+          // flow existed have no `_action` tag on their items — treat those
+          // as plain additions, same as before.
+          const nameKey = (it: any) => (it.title || it.description || it.material_name || it.name || "").toString().toLowerCase().trim();
+          const newItemsAdd = newItems.filter((it: any) => (it._action || "add") === "add");
+          const newItemsEdit = newItems.filter((it: any) => it._action === "edit");
+          const newItemsDelete = newItems.filter((it: any) => it._action === "delete");
+          const editByKey = new Map(newItemsEdit.map((it: any) => [nameKey(it), it]));
+          const deleteKeys = new Set(newItemsDelete.map((it: any) => nameKey(it)));
+
+          mergedItems = globalProductItems.map((it: any) => {
+            const key = nameKey(it);
+            if (deleteKeys.has(key)) {
+              return { ...it, manualApproval: { requestId: r.id, status: r.status, action: "delete" } };
+            }
+            if (editByKey.has(key)) {
+              const editPatch = editByKey.get(key) || {};
+              return { ...it, ...editPatch, manualApproval: { requestId: r.id, status: r.status, action: "edit" } };
+            }
+            return it;
+          });
+
+          if (r.status === "approved") {
+            // Deleted items are already removed from the live product by
+            // now — re-add them here purely for display, so the approval
+            // history still shows what was taken out.
+            const presentKeys = new Set(mergedItems.map(nameKey));
+            newItemsDelete.forEach((it: any) => {
+              if (!presentKeys.has(nameKey(it))) {
+                mergedItems.push({ ...it, manualApproval: { requestId: r.id, status: r.status, action: "delete" } });
+              }
+            });
+          }
+
           if (r.status !== 'approved') {
             // Append them if they aren't in the global product yet (pending or rejected)
-            const taggedNewItems = newItems.map((it: any) => ({
+            const taggedNewItems = newItemsAdd.map((it: any) => ({
               ...it,
-              manualApproval: { requestId: r.id, status: r.status }
+              manualApproval: { requestId: r.id, status: r.status, action: "add" }
             }));
             mergedItems.push(...taggedNewItems);
           } else {
             // If approved, they are already inserted into globalProductItems by the backend.
             // We just need to identify and highlight them by matching names.
-            const newNames = new Set(newItems.map((ni: any) => (ni.title || ni.description || ni.material_name || "").toLowerCase().trim()));
+            const newNames = new Set(newItemsAdd.map((ni: any) => nameKey(ni)));
             mergedItems = mergedItems.map((it: any) => {
-              const title = (it.title || it.description || it.material_name || "").toLowerCase().trim();
-              if (newNames.has(title)) {
-                return { ...it, manualApproval: { requestId: r.id, status: r.status } };
+              if (newNames.has(nameKey(it))) {
+                return { ...it, manualApproval: { requestId: r.id, status: r.status, action: "add" } };
               }
               return it;
             });
@@ -204,7 +236,7 @@ export default function NewItemsApprovalTab({ canAct }: { canAct: boolean }) {
         const usingFullProductView = r.type === "save";
         const isNewItem = (it: any) =>
           usingFullProductView
-            ? !!(it?.manualApproval && it.manualApproval.requestId === r.id)
+            ? !!(it?.manualApproval && it.manualApproval.requestId === r.id && (it.manualApproval.action || "add") === "add")
             : true;
         const newItemCount = r.type === "save" ? newItems.length : items.length;
 
@@ -245,7 +277,7 @@ export default function NewItemsApprovalTab({ canAct }: { canAct: boolean }) {
                   <div>
                     <div className="font-bold text-sm text-slate-800 flex items-center gap-2">
                       {r.type === "save" ? (
-                        <>Add {newItemCount} item{newItemCount === 1 ? "" : "s"} to <span className="text-primary">{r.source_product_name}</span></>
+                        <>{newItemCount} change{newItemCount === 1 ? "" : "s"} to <span className="text-primary">{r.source_product_name}</span></>
                       ) : (
                         <>New Manual Product: <span className="text-primary">{r.new_product_name}</span></>
                       )}
@@ -351,6 +383,9 @@ export default function NewItemsApprovalTab({ canAct }: { canAct: boolean }) {
                           const baseAmt = baseQty * rate;
                           const isFrozen = it.freezeAndEdit;
                           const isNew = isNewItem(it);
+                          const action = it?.manualApproval?.action;
+                          const isDeleted = action === "delete";
+                          const isEdited = action === "edit";
 
                           // Use computeBoq results if available
                           const computed = boqRes?.computed?.[idx];
@@ -362,18 +397,26 @@ export default function NewItemsApprovalTab({ canAct }: { canAct: boolean }) {
                           return (
                             <TableRow
                               key={idx}
-                              className={`hover:bg-muted/5 text-[11px] ${isNew
-                                ? "bg-emerald-50 border-l-4 border-l-emerald-500 shadow-sm"
-                                : isFrozen
-                                  ? "bg-cyan-100/60 border-l-4 border-l-cyan-500 shadow-sm"
-                                  : ""
+                              className={`hover:bg-muted/5 text-[11px] ${isDeleted
+                                ? "bg-red-50 border-l-4 border-l-red-500 shadow-sm line-through opacity-70"
+                                : isNew
+                                  ? "bg-emerald-50 border-l-4 border-l-emerald-500 shadow-sm"
+                                  : isEdited
+                                    ? "bg-amber-50 border-l-4 border-l-amber-500 shadow-sm"
+                                    : isFrozen
+                                      ? "bg-cyan-100/60 border-l-4 border-l-cyan-500 shadow-sm"
+                                      : ""
                                 }`}
                             >
                               <TableCell className="text-center font-medium">{idx + 1}</TableCell>
                               {usingFullProductView && (
                                 <TableCell>
-                                  {isNew ? (
+                                  {isDeleted ? (
+                                    <Badge className="bg-red-100 text-red-700 hover:bg-red-100 font-bold text-[10px] px-1.5 py-0">Removed</Badge>
+                                  ) : isNew ? (
                                     <Badge className="bg-emerald-100 text-emerald-700 hover:bg-emerald-100 font-bold text-[10px] px-1.5 py-0">New</Badge>
+                                  ) : isEdited ? (
+                                    <Badge className="bg-amber-100 text-amber-700 hover:bg-amber-100 font-bold text-[10px] px-1.5 py-0">Edited</Badge>
                                   ) : (
                                     <span className="text-[10px] text-slate-400 font-medium">Existing</span>
                                   )}
@@ -418,7 +461,7 @@ export default function NewItemsApprovalTab({ canAct }: { canAct: boolean }) {
                   </div>
                   {usingFullProductView && (
                     <p className="text-[11px] text-slate-400 px-1">
-                      Showing the full product — <span className="font-bold text-emerald-600">{newItemCount} newly added item{newItemCount === 1 ? "" : "s"}</span> highlighted in green, existing items shown for context.
+                      Showing the full product — <span className="font-bold text-emerald-600">new</span>, <span className="font-bold text-amber-600">edited</span>, and <span className="font-bold text-red-600">removed</span> materials are highlighted; unchanged items shown for context.
                     </p>
                   )}
 
