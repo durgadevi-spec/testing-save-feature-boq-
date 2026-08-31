@@ -88,19 +88,31 @@ export const BoqItemCard = React.memo(function BoqItemCard({ boqItem, boqIdx, is
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
   const [amendRatesActive, setAmendRatesActive] = useState(false);
   const [showNotes, setShowNotes] = useState(false);
+  // Step11 items marked for removal via the Trash icon, but NOT yet
+  // deleted on the server. They're hidden from the BOM table below
+  // (see renderLines) and shown to the Save wizard as "Marked for
+  // removal" via preDeletedIndexes. The real deletion only happens when
+  // the user submits the Save wizard (handleSubmitSaveEdit), which flags
+  // the item with manualApproval: { status: "pending", action: "delete" }
+  // on the server WITHOUT removing it from step11_items — so no other
+  // item's _s11Idx ever shifts while a deletion is pending. ─────────────
   const [deletedFromBom, setDeletedFromBom] = useState<any[]>([]);
 
   const handleCardDeleteRow = (id: string, td: any, idx: number, item?: any) => {
-    if (item) {
-      const trackIdx = item._s11Idx !== undefined ? item._s11Idx : item.index;
-      if (trackIdx >= 0) {
-        setDeletedFromBom(prev => {
-          const itemTrackIdx = trackIdx;
-          if (prev.some(i => (i._s11Idx !== undefined ? i._s11Idx : i.index) === itemTrackIdx)) return prev;
-          return [...prev, item];
-        });
-      }
+    const isStep11Item = !!item && item._s11Idx !== undefined;
+    if (isStep11Item) {
+      // Defer: track locally + hide from the table. Nothing is deleted
+      // on the server until the Save wizard is submitted.
+      setDeletedFromBom(prev => {
+        if (prev.some(i => i._s11Idx === item._s11Idx)) return prev;
+        return [...prev, item];
+      });
+      return;
     }
+    // Engine-based material line items (tableData.materialLines) aren't
+    // covered by the pending-approval endpoint yet — it only understands
+    // step11_items indexes — so keep the previous instant-delete behavior
+    // for them.
     handleDeleteRow(id, td, idx, item);
   };
   const [localRemarks, setLocalRemarks] = useState(tableData.remarks || "");
@@ -188,6 +200,12 @@ export const BoqItemCard = React.memo(function BoqItemCard({ boqItem, boqIdx, is
       if (data?.table_data) {
         setBoqItems((prev) => prev.map((i) => (i.id === boqItem.id ? { ...i, table_data: data.table_data } : i)));
       }
+      // The server now carries manualApproval pending-delete flags on the
+      // touched step11_items, so renderLines' filter will keep hiding them
+      // from that going forward. Clear the local tracking so it doesn't
+      // keep hiding anything the wizard's own "undo delete" toggle un-marked
+      // before submit.
+      setDeletedFromBom([]);
       toast({ title: "Submitted for Approval", description: `${totalChanges} change(s) submitted for ${productName}.` });
       setShowSaveEditWizard(false);
     } catch (err) {
@@ -426,7 +444,21 @@ export const BoqItemCard = React.memo(function BoqItemCard({ boqItem, boqIdx, is
   }
 
   // Use updated displayLines directly if we just synced, otherwise use localItems
-  const renderLines = shouldSync ? displayLines : (reorderInit ? localItems : displayLines);
+  const rawRenderLines = shouldSync ? displayLines : (reorderInit ? localItems : displayLines);
+
+  // Hide items marked for removal — either locally (trash icon clicked,
+  // not yet submitted) or already flagged pending-delete on the server
+  // (Save wizard submitted, awaiting admin approval). The underlying
+  // step11_items array is untouched in both cases, so this is purely a
+  // display filter. Also used below to exclude their amounts from totals.
+  const deletedS11Indexes = useMemo(
+    () => new Set(deletedFromBom.map((i: any) => i._s11Idx)),
+    [deletedFromBom]
+  );
+  const isMarkedForRemoval = (it: any) =>
+    (it._s11Idx !== undefined && deletedS11Indexes.has(it._s11Idx)) ||
+    (it.manualApproval?.status === "pending" && it.manualApproval?.action === "delete");
+  const renderLines = rawRenderLines.filter((it: any) => !isMarkedForRemoval(it));
 
   const handleRowReorder = async (newOrder: any[]) => {
     setLocalItems(newOrder);
@@ -470,7 +502,9 @@ export const BoqItemCard = React.memo(function BoqItemCard({ boqItem, boqIdx, is
   };
 
 
-  const totalAmount = displayLines.reduce((sum: number, it: any) => sum + (Number(it.amount) || 0), 0);
+  const totalAmount = displayLines
+    .filter((it: any) => !isMarkedForRemoval(it))
+    .reduce((sum: number, it: any) => sum + (Number(it.amount) || 0), 0);
 
   // Calculate Standard Rate at Base Qty (e.g. 100 Sqft) to ensure consistency across projects
   const baseQty = Number(tableData.configBasis?.baseRequiredQty || 1);
@@ -1022,8 +1056,8 @@ export const BoqItemCard = React.memo(function BoqItemCard({ boqItem, boqIdx, is
         open={showSaveEditWizard}
         onOpenChange={setShowSaveEditWizard}
         sourceProductName={productName}
-        items={[...renderLines, ...deletedFromBom].map((it: any, index: number) => ({ ...it, index: it._s11Idx !== undefined ? it._s11Idx : index })) as PendingManualItem[]}
-        preDeletedIndexes={deletedFromBom.map(i => i._s11Idx !== undefined ? i._s11Idx : i.index)}
+        items={[...renderLines, ...deletedFromBom].map((it: any, index: number) => ({ ...it, index: it._s11Idx !== undefined ? it._s11Idx : -1_000_000 - index })) as PendingManualItem[]}
+        preDeletedIndexes={deletedFromBom.map((i: any) => i._s11Idx)}
         isSubmitting={isSubmittingSave}
         existingProductNames={existingProductNamesInVersion}
         onSubmit={() => { }}
@@ -1034,8 +1068,8 @@ export const BoqItemCard = React.memo(function BoqItemCard({ boqItem, boqIdx, is
         open={showSaveAsWizard}
         onOpenChange={setShowSaveAsWizard}
         sourceProductName={productName}
-        items={[...renderLines, ...deletedFromBom].map((it: any, index: number) => ({ ...it, index: it._s11Idx !== undefined ? it._s11Idx : index })) as PendingManualItem[]}
-        preDeletedIndexes={deletedFromBom.map(i => i._s11Idx !== undefined ? i._s11Idx : i.index)}
+        items={[...renderLines, ...deletedFromBom].map((it: any, index: number) => ({ ...it, index: it._s11Idx !== undefined ? it._s11Idx : -1_000_000 - index })) as PendingManualItem[]}
+        preDeletedIndexes={deletedFromBom.map((i: any) => i._s11Idx)}
         isSubmitting={isSubmittingSave}
         existingProductNames={existingProductNamesInVersion}
         onSubmit={handleSubmitSaveAs}

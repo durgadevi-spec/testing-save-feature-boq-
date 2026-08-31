@@ -558,7 +558,7 @@ export function SaveAsWizardDialog({
       if (isEngineLine) return;
 
       const isFreshAdd = item.manual === true && !item.manualApproval;
-      
+
       // If deleted, we don't need to add it to editedItems or addedIdx.
       // deletedIndexes is passed separately.
       if (deletedIndexes.has(item.index)) {
@@ -566,9 +566,9 @@ export function SaveAsWizardDialog({
           // If it's a fresh add AND deleted before approval, we should still
           // tell the backend it's deleted (so it gets removed from step11_items).
         }
-        return; 
+        return;
       }
-      
+
       if (isFreshAdd) {
         addedIdx.push(item.index);
       }
@@ -585,7 +585,7 @@ export function SaveAsWizardDialog({
       const changed = cfg.qty !== origQty || cfg.wastagePct !== origWastage || cfg.supplyRate !== origSupply
         || cfg.installRate !== origInstall || cfg.freezeAndEdit !== origFreeze || cfg.applyWastage !== origApplyWastage
         || cfg.applyRounding !== origApplyRounding || (cfg.description || "") !== origDescription;
-      
+
       if (changed) {
         editedItemsOut.push({
           index: item.index,
@@ -1004,8 +1004,15 @@ export function SaveAsWizardDialog({
                         : isFreezed
                           ? "bg-cyan-100 border-cyan-200"
                           : "bg-white";
+                    // "save" mode's deletedIndexes/onSubmitSave payload only understands
+                    // step11_items positions (it._s11Idx). Engine material-line rows
+                    // (no _s11Idx) are shown here for context/rate-editing only — they
+                    // can't be deleted through this approval flow, so don't offer the
+                    // toggle for them (it would silently do nothing on submit while
+                    // looking like it worked).
+                    const isEngineLineInSaveMode = mode === "save" && (it as any)._s11Idx === undefined;
                     return (
-                      <TableRow key={it.index} className={`hover:bg-muted/5 transition-colors border-b ${rowClass}`}>
+                      <TableRow key={`${it._s11Idx !== undefined ? "s11" : "ml"}-${it.index}-${idx}`} className={`hover:bg-muted/5 transition-colors border-b ${rowClass}`}>
                         <TableCell className="text-center cursor-grab active:cursor-grabbing">
                           <GripVertical className="h-4 w-4 text-muted-foreground/40" />
                         </TableCell>
@@ -1014,8 +1021,10 @@ export function SaveAsWizardDialog({
                           <Button
                             variant="ghost"
                             size="sm"
-                            title={isMarkedDeleted ? "Undo delete" : (mode === "save" && it.index >= 0) ? "Delete this material" : "Remove"}
+                            disabled={isEngineLineInSaveMode}
+                            title={isEngineLineInSaveMode ? "Engine materials aren't editable here" : isMarkedDeleted ? "Undo delete" : (mode === "save" && it.index >= 0) ? "Delete this material" : "Remove"}
                             onClick={() => {
+                              if (isEngineLineInSaveMode) return;
                               if (mode === "save" && it.index >= 0) {
                                 setDeletedIndexes((prev) => {
                                   const next = new Set(prev);
@@ -1026,7 +1035,7 @@ export function SaveAsWizardDialog({
                                 removeItem(it.index);
                               }
                             }}
-                            className={`h-6 w-6 p-0 hover:bg-red-50 ${isMarkedDeleted ? "text-emerald-600 hover:text-emerald-700" : "text-red-500 hover:text-red-700"}`}
+                            className={`h-6 w-6 p-0 hover:bg-red-50 ${isEngineLineInSaveMode ? "opacity-30 cursor-not-allowed" : isMarkedDeleted ? "text-emerald-600 hover:text-emerald-700" : "text-red-500 hover:text-red-700"}`}
                           >
                             <span className="text-xs font-bold">{isMarkedDeleted ? "↺" : "×"}</span>
                           </Button>
