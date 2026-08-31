@@ -189,10 +189,10 @@ export const BoqItemCard = React.memo(function BoqItemCard({ boqItem, boqIdx, is
   // above (additive-only), this lets the user also edit or remove existing
   // materials — nothing changes on the live product until an admin
   // approves the request. ──────────────────────────────────────────────
-  const handleSubmitSaveEdit = async (payload: { addedIndexes: number[]; deletedIndexes: number[]; editedItems: { index: number; patch: any }[]; deletedMaterialIndexes?: number[] }) => {
+  const handleSubmitSaveEdit = async (payload: { addedIndexes: number[]; deletedIndexes: number[]; editedItems: { index: number; patch: any }[]; deletedMaterialIndexes?: number[]; editedMaterialIndexes?: { index: number; patch: any }[] }) => {
     if (isSubmittingSave) return;
-    const { addedIndexes, deletedIndexes, editedItems, deletedMaterialIndexes = [] } = payload;
-    const totalChanges = addedIndexes.length + deletedIndexes.length + editedItems.length + deletedMaterialIndexes.length;
+    const { addedIndexes, deletedIndexes, editedItems, deletedMaterialIndexes = [], editedMaterialIndexes = [] } = payload;
+    const totalChanges = addedIndexes.length + deletedIndexes.length + editedItems.length + deletedMaterialIndexes.length + editedMaterialIndexes.length;
     if (totalChanges === 0) {
       toast({ title: "No changes", description: "Nothing was added, edited, or deleted." });
       return;
@@ -209,6 +209,7 @@ export const BoqItemCard = React.memo(function BoqItemCard({ boqItem, boqIdx, is
           deletedIndexes,
           editedItems,
           deletedMaterialIndexes,
+          editedMaterialIndexes,
         }),
       });
       if (!res.ok) throw new Error(await res.text());

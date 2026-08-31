@@ -8825,7 +8825,7 @@ export async function registerRoutes(
     authMiddleware,
     async (req: Request, res: Response) => {
       try {
-        const { type, boqItemId, itemIndexes, newProductName, items, calculatedResults, productConfig, fullEdit, addedIndexes, deletedIndexes, editedItems, deletedMaterialIndexes } = req.body;
+        const { type, boqItemId, itemIndexes, newProductName, items, calculatedResults, productConfig, fullEdit, addedIndexes, deletedIndexes, editedItems, deletedMaterialIndexes, editedMaterialIndexes } = req.body;
 
         if (type !== "save" && type !== "save_as") {
           res.status(400).json({ message: "type must be 'save' or 'save_as'" });
@@ -8845,9 +8845,12 @@ export async function registerRoutes(
           // array/index-space from step11_items, so they're tracked with
           // their own list end-to-end rather than folded into allTouched.
           const deletedMaterialIdx: number[] = Array.isArray(deletedMaterialIndexes) ? deletedMaterialIndexes.map(Number) : [];
+          // Edits to the product's original/pre-existing materials — same
+          // separate index-space reasoning as deletedMaterialIdx above.
+          const editedMaterialList: { index: number; patch: any }[] = Array.isArray(editedMaterialIndexes) ? editedMaterialIndexes : [];
           const allTouched = [...addedIdx, ...deletedIdx, ...editedList.map((e) => Number(e.index))];
 
-          if (!boqItemId || (allTouched.length === 0 && deletedMaterialIdx.length === 0)) {
+          if (!boqItemId || (allTouched.length === 0 && deletedMaterialIdx.length === 0 && editedMaterialList.length === 0)) {
             res.status(400).json({ message: "boqItemId and at least one added, edited, or deleted item are required" });
             return;
           }
@@ -8884,6 +8887,18 @@ export async function registerRoutes(
               return;
             }
           }
+          for (const e of editedMaterialList) {
+            const idx = Number(e.index);
+            const line = materialLines[idx];
+            if (!line) {
+              res.status(400).json({ message: `Material line ${idx} not found` });
+              return;
+            }
+            if (line.manualApproval && line.manualApproval.status === "pending") {
+              res.status(400).json({ message: "One or more materials already have a pending change awaiting approval." });
+              return;
+            }
+          }
 
           const addedSnapshot = addedIdx.map((idx) => {
             const editPatch = editedList.find(e => Number(e.index) === idx)?.patch || {};
@@ -8899,7 +8914,11 @@ export async function registerRoutes(
           const deletedMaterialSnapshot = deletedMaterialIdx.map((idx) => ({
             ...materialLines[idx], _action: "delete", _source: "materialLine", _materialIndex: idx,
           }));
-          const combinedSnapshot = [...addedSnapshot, ...editedSnapshot, ...deletedSnapshot, ...deletedMaterialSnapshot];
+          const editedMaterialSnapshot = editedMaterialList.map((e) => {
+            const idx = Number(e.index);
+            return { ...materialLines[idx], ...(e.patch || {}), _action: "edit", _source: "materialLine", _materialIndex: idx, _before: materialLines[idx] };
+          });
+          const combinedSnapshot = [...addedSnapshot, ...editedSnapshot, ...deletedSnapshot, ...deletedMaterialSnapshot, ...editedMaterialSnapshot];
 
           const userObj = (req.user as any) || {};
           const requestedBy = userObj.id || "system";
@@ -8921,21 +8940,29 @@ export async function registerRoutes(
               null,
               JSON.stringify(allTouched),
               JSON.stringify(combinedSnapshot),
-              deletedMaterialIdx.length > 0 ? JSON.stringify({ deletedMaterialIndexes: deletedMaterialIdx }) : null,
+              (deletedMaterialIdx.length > 0 || editedMaterialList.length > 0)
+                ? JSON.stringify({ deletedMaterialIndexes: deletedMaterialIdx, editedMaterialIndexes: editedMaterialList.map(e => Number(e.index)) })
+                : null,
               requestedBy,
               requestedByName,
             ]
           );
           const request = insertResult.rows[0];
 
+          const editedMaterialIdxSet = new Set(editedMaterialList.map(e => Number(e.index)));
           const updatedStep11 = step11Items.map((it: any, idx: number) => {
             if (!allTouched.includes(idx)) return it;
             const action = addedIdx.includes(idx) ? "add" : deletedIdx.includes(idx) ? "delete" : "edit";
             return { ...it, manualApproval: { status: "pending", requestId: request.id, type: "save", action, submittedAt: new Date().toISOString() } };
           });
           const updatedMaterialLines = materialLines.map((line: any, idx: number) => {
-            if (!deletedMaterialIdx.includes(idx)) return line;
-            return { ...line, manualApproval: { status: "pending", requestId: request.id, type: "save", action: "delete", submittedAt: new Date().toISOString() } };
+            if (deletedMaterialIdx.includes(idx)) {
+              return { ...line, manualApproval: { status: "pending", requestId: request.id, type: "save", action: "delete", submittedAt: new Date().toISOString() } };
+            }
+            if (editedMaterialIdxSet.has(idx)) {
+              return { ...line, manualApproval: { status: "pending", requestId: request.id, type: "save", action: "edit", submittedAt: new Date().toISOString() } };
+            }
+            return line;
           });
           const updatedTableData = {
             ...tableData,
@@ -9183,10 +9210,15 @@ export async function registerRoutes(
           // "every touched item is a fresh add" for the older additive-only
           // Save flow, so nothing already relying on that shape breaks.
           let snapshotByIndex: Record<number, any> = {};
+          // Keyed by _materialIndex (materialLines position), separate from
+          // snapshotByIndex above (step11_items position) — same index-space
+          // split used everywhere else materialLine changes are tracked.
+          let snapshotByMaterialIndex: Record<number, any> = {};
           try {
             const parsedSnapshot = Array.isArray(request.items) ? request.items : JSON.parse(request.items || "[]");
             for (const s of parsedSnapshot) {
               if (s && typeof s._index === "number") snapshotByIndex[s._index] = s;
+              if (s && s._source === "materialLine" && typeof s._materialIndex === "number") snapshotByMaterialIndex[s._materialIndex] = s;
             }
           } catch { /* legacy requests have no structured snapshot — ignore */ }
 
@@ -9234,11 +9266,26 @@ export async function registerRoutes(
           // materialLines and — same as step11 deletions below — from the
           // global product library.
           const updatedMaterialLines = materialLines
-            .map((line: any) => {
+            .map((line: any, idx: number) => {
               if (!line?.manualApproval || line.manualApproval.requestId !== id || line.manualApproval.status !== "pending") return line;
-              if (line.manualApproval.action !== "delete") return line;
-              deletedItemsToSync.push(line);
-              return null; // filtered out below — material removed from this product
+
+              if (line.manualApproval.action === "delete") {
+                deletedItemsToSync.push(line);
+                return null; // filtered out below — material removed from this product
+              }
+              if (line.manualApproval.action === "edit") {
+                const snap = snapshotByMaterialIndex[idx];
+                if (!snap) {
+                  const { manualApproval, ...rest } = line;
+                  return rest;
+                }
+                const { _action, _index, _materialIndex, _source, _before, manualApproval, ...patchedFields } = snap;
+                const merged = { ...line, ...patchedFields };
+                delete merged.manualApproval;
+                editedItemsToSync.push(merged);
+                return merged;
+              }
+              return line;
             })
             .filter((line: any) => line !== null);
 
@@ -9250,12 +9297,50 @@ export async function registerRoutes(
           await query(`UPDATE boq_items SET table_data = $1, computed_value = $2 WHERE id = $3`, [JSON.stringify(updatedTableData), computeItemValue(updatedTableData), request.boq_item_id]);
 
           // Sync additions, edits, and deletions into the global product
-          // library (step11_product_items) so Manage Product reflects them.
+          // library so Manage Product (and the next "+ Add Product" for this
+          // product) reflect them. This has to touch every table that stores
+          // a copy of the product's material list, mirroring exactly what
+          // "Manage Product -> Edit -> Save" itself writes to:
+          //   - step11_product_items   (the "Approved" config Manage Product shows)
+          //   - product_step3_config_items (the "draft"/working config — this is
+          //     also what Generate BOM's "+ Add Product" reads materialLines from,
+          //     see confirmAddToBom's GET /api/product-step3-config/:id call, so
+          //     skipping this table means a deleted material silently reappears
+          //     the next time this product is added to a BOM)
+          //   - product_approval_items (audit-trail row, if an 'approved' one exists)
           if (tableData.product_id && (newItemsToInsert.length > 0 || editedItemsToSync.length > 0 || deletedItemsToSync.length > 0)) {
             const activeConfigRes = await query(
-              `SELECT id FROM step11_products WHERE product_id = $1 ORDER BY created_at DESC LIMIT 1`,
+              `SELECT id, config_name FROM step11_products WHERE product_id = $1 ORDER BY created_at DESC LIMIT 1`,
               [tableData.product_id]
             );
+            const configNameForSync: string | null = activeConfigRes.rowCount && activeConfigRes.rowCount > 0
+              ? activeConfigRes.rows[0].config_name
+              : null;
+
+            // Latest draft/working config for this product (Step 3 table).
+            const step3ConfigRes = configNameForSync
+              ? await query(
+                `SELECT id FROM product_step3_config WHERE product_id = $1 AND config_name = $2 ORDER BY updated_at DESC LIMIT 1`,
+                [tableData.product_id, configNameForSync]
+              )
+              : await query(
+                `SELECT id FROM product_step3_config WHERE product_id = $1 ORDER BY updated_at DESC LIMIT 1`,
+                [tableData.product_id]
+              );
+            const step3ConfigId: number | null = step3ConfigRes.rowCount && step3ConfigRes.rowCount > 0
+              ? step3ConfigRes.rows[0].id
+              : null;
+
+            // Matching audit-trail "approved" row, if one exists.
+            const approvalRowRes = configNameForSync
+              ? await query(
+                `SELECT id FROM product_approvals WHERE product_id = $1 AND config_name = $2 AND status = 'approved'`,
+                [tableData.product_id, configNameForSync]
+              )
+              : { rowCount: 0, rows: [] as any[] };
+            const approvalRowId: number | string | null = approvalRowRes.rowCount && approvalRowRes.rowCount > 0
+              ? approvalRowRes.rows[0].id
+              : null;
 
             if (activeConfigRes.rowCount && activeConfigRes.rowCount > 0) {
               const step11ProductId = activeConfigRes.rows[0].id;
@@ -9382,6 +9467,212 @@ export async function registerRoutes(
                        )
                        WHERE id = $1`,
                 [step11ProductId]
+              );
+            }
+
+            // Mirror the exact same add / edit / delete into the Step 3
+            // draft/working config — this is what confirmAddToBom actually
+            // reads materialLines from (GET /api/product-step3-config/:id),
+            // so without this a deleted material would reappear the next
+            // time the product is added to a BOM even though it's gone
+            // from the "Approved" config above.
+            if (step3ConfigId) {
+              for (const item of newItemsToInsert) {
+                const matId = item.id || item.material_id || item.materialId || null;
+                const matName = item.name || item.title || item.material_name || "";
+                const supplyRate = item.supplyRate ?? item.supply_rate ?? 0;
+                const installRate = item.installRate ?? item.install_rate ?? 0;
+
+                const existingRes = await query(
+                  `SELECT id FROM product_step3_config_items WHERE step3_config_id = $1 AND (
+                     ($2::text IS NOT NULL AND material_id::text = $2::text) OR material_name = $3
+                   )`,
+                  [step3ConfigId, matId, matName]
+                );
+
+                if (existingRes.rowCount && existingRes.rowCount > 0) {
+                  await query(
+                    `UPDATE product_step3_config_items SET
+                       unit = $1, qty = $2, supply_rate = $3, install_rate = $4, rate = $5,
+                       amount = $6, freeze_and_edit = $7, apply_wastage = $8, shop_name = $9,
+                       base_qty = $10, wastage_pct = $11, location = $12
+                     WHERE step3_config_id = $13 AND (
+                       ($14::text IS NOT NULL AND material_id::text = $14::text) OR material_name = $15
+                     )`,
+                    [
+                      item.unit || "nos", item.qty || 0, supplyRate, installRate,
+                      supplyRate + installRate, (item.qty || 0) * (supplyRate + installRate),
+                      item.freezeAndEdit === true || item.freeze_and_edit === true,
+                      item.applyWastage !== undefined ? item.applyWastage : true,
+                      item.shopName || item.shop_name || null,
+                      item.baseQty ?? item.qty ?? 0,
+                      item.wastagePct !== undefined ? item.wastagePct : null,
+                      item.location || "",
+                      step3ConfigId, matId, matName,
+                    ]
+                  );
+                } else {
+                  await query(
+                    `INSERT INTO product_step3_config_items
+                       (step3_config_id, material_id, material_name, unit, qty, supply_rate, install_rate, rate, amount, location, freeze_and_edit, apply_wastage, shop_name, base_qty, wastage_pct)
+                       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
+                    [
+                      step3ConfigId, matId, matName, item.unit || "nos", item.qty || 0,
+                      supplyRate, installRate, supplyRate + installRate,
+                      (item.qty || 0) * (supplyRate + installRate), item.location || "",
+                      item.freezeAndEdit === true || item.freeze_and_edit === true,
+                      item.applyWastage !== undefined ? item.applyWastage : true,
+                      item.shopName || item.shop_name || null,
+                      item.baseQty ?? item.qty ?? 0,
+                      item.wastagePct !== undefined ? item.wastagePct : null,
+                    ]
+                  );
+                }
+              }
+
+              for (const item of editedItemsToSync) {
+                const materialId = item.id || item.material_id || item.materialId || null;
+                const supplyRate = item.supplyRate ?? item.supply_rate ?? 0;
+                const installRate = item.installRate ?? item.install_rate ?? 0;
+                await query(
+                  `UPDATE product_step3_config_items SET
+                     qty = $1, supply_rate = $2, install_rate = $3, rate = $4, amount = $5,
+                     freeze_and_edit = $6, apply_wastage = $7, base_qty = $8, wastage_pct = $9
+                   WHERE step3_config_id = $10 AND (
+                     ($11::text IS NOT NULL AND material_id::text = $11::text) OR material_name = $12
+                   )`,
+                  [
+                    item.qty || 0, supplyRate, installRate, supplyRate + installRate,
+                    (item.qty || 0) * (supplyRate + installRate),
+                    item.freezeAndEdit === true || item.freeze_and_edit === true,
+                    item.applyWastage !== undefined ? item.applyWastage : true,
+                    item.baseQty ?? item.qty ?? 0,
+                    item.wastagePct !== undefined ? item.wastagePct : null,
+                    step3ConfigId, materialId, item.name || item.title || item.material_name,
+                  ]
+                );
+              }
+
+              for (const item of deletedItemsToSync) {
+                const materialId = item.id || item.material_id || item.materialId || null;
+                await query(
+                  `DELETE FROM product_step3_config_items
+                   WHERE step3_config_id = $1 AND (
+                     ($2::text IS NOT NULL AND material_id::text = $2::text) OR material_name = $3
+                   )`,
+                  [step3ConfigId, materialId, item.name || item.title || item.material_name]
+                );
+              }
+
+              await query(
+                `UPDATE product_step3_config
+                   SET total_cost = (
+                     SELECT COALESCE(SUM(qty * (COALESCE(supply_rate, 0) + COALESCE(install_rate, 0))), 0)
+                     FROM product_step3_config_items WHERE step3_config_id = $1
+                   ), updated_at = NOW()
+                 WHERE id = $1`,
+                [step3ConfigId]
+              );
+            }
+
+            // Keep the audit-trail "approved" record's own item list in sync too,
+            // exactly like save-approved-edit does, so its history stays accurate.
+            if (approvalRowId) {
+              for (const item of newItemsToInsert) {
+                const matId = item.id || item.material_id || item.materialId || null;
+                const matName = item.name || item.title || item.material_name || "";
+                const supplyRate = item.supplyRate ?? item.supply_rate ?? 0;
+                const installRate = item.installRate ?? item.install_rate ?? 0;
+
+                const existingRes = await query(
+                  `SELECT id FROM product_approval_items WHERE approval_id = $1 AND (
+                     ($2::text IS NOT NULL AND material_id::text = $2::text) OR material_name = $3
+                   )`,
+                  [approvalRowId, matId, matName]
+                );
+
+                if (existingRes.rowCount && existingRes.rowCount > 0) {
+                  await query(
+                    `UPDATE product_approval_items SET
+                       unit = $1, qty = $2, supply_rate = $3, install_rate = $4, rate = $5,
+                       amount = $6, freeze_and_edit = $7, apply_wastage = $8, shop_name = $9,
+                       base_qty = $10, wastage_pct = $11, location = $12
+                     WHERE approval_id = $13 AND (
+                       ($14::text IS NOT NULL AND material_id::text = $14::text) OR material_name = $15
+                     )`,
+                    [
+                      item.unit || "nos", item.qty || 0, supplyRate, installRate,
+                      supplyRate + installRate, (item.qty || 0) * (supplyRate + installRate),
+                      item.freezeAndEdit === true || item.freeze_and_edit === true,
+                      item.applyWastage !== undefined ? item.applyWastage : true,
+                      item.shopName || item.shop_name || null,
+                      item.baseQty ?? item.qty ?? 0,
+                      item.wastagePct !== undefined ? item.wastagePct : null,
+                      item.location || "",
+                      approvalRowId, matId, matName,
+                    ]
+                  );
+                } else {
+                  await query(
+                    `INSERT INTO product_approval_items
+                       (approval_id, material_id, material_name, unit, qty, supply_rate, install_rate, rate, amount, location, freeze_and_edit, apply_wastage, shop_name, base_qty, wastage_pct)
+                       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
+                    [
+                      approvalRowId, matId, matName, item.unit || "nos", item.qty || 0,
+                      supplyRate, installRate, supplyRate + installRate,
+                      (item.qty || 0) * (supplyRate + installRate), item.location || "",
+                      item.freezeAndEdit === true || item.freeze_and_edit === true,
+                      item.applyWastage !== undefined ? item.applyWastage : true,
+                      item.shopName || item.shop_name || null,
+                      item.baseQty ?? item.qty ?? 0,
+                      item.wastagePct !== undefined ? item.wastagePct : null,
+                    ]
+                  );
+                }
+              }
+
+              for (const item of editedItemsToSync) {
+                const materialId = item.id || item.material_id || item.materialId || null;
+                const supplyRate = item.supplyRate ?? item.supply_rate ?? 0;
+                const installRate = item.installRate ?? item.install_rate ?? 0;
+                await query(
+                  `UPDATE product_approval_items SET
+                     qty = $1, supply_rate = $2, install_rate = $3, rate = $4, amount = $5,
+                     freeze_and_edit = $6, apply_wastage = $7, base_qty = $8, wastage_pct = $9
+                   WHERE approval_id = $10 AND (
+                     ($11::text IS NOT NULL AND material_id::text = $11::text) OR material_name = $12
+                   )`,
+                  [
+                    item.qty || 0, supplyRate, installRate, supplyRate + installRate,
+                    (item.qty || 0) * (supplyRate + installRate),
+                    item.freezeAndEdit === true || item.freeze_and_edit === true,
+                    item.applyWastage !== undefined ? item.applyWastage : true,
+                    item.baseQty ?? item.qty ?? 0,
+                    item.wastagePct !== undefined ? item.wastagePct : null,
+                    approvalRowId, materialId, item.name || item.title || item.material_name,
+                  ]
+                );
+              }
+
+              for (const item of deletedItemsToSync) {
+                const materialId = item.id || item.material_id || item.materialId || null;
+                await query(
+                  `DELETE FROM product_approval_items
+                   WHERE approval_id = $1 AND (
+                     ($2::text IS NOT NULL AND material_id::text = $2::text) OR material_name = $3
+                   )`,
+                  [approvalRowId, materialId, item.name || item.title || item.material_name]
+                );
+              }
+
+              await query(
+                `UPDATE product_approvals
+                   SET total_cost = (
+                     SELECT COALESCE(SUM(qty * (COALESCE(supply_rate, 0) + COALESCE(install_rate, 0))), 0)
+                     FROM product_approval_items WHERE approval_id = $1
+                   ), updated_at = NOW()
+                 WHERE id = $1`,
+                [approvalRowId]
               );
             }
           }

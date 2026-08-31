@@ -171,7 +171,7 @@ export function SaveAsWizardDialog({
    * can be removed (not just new ones added), all submitted together for
    * approval. */
   mode?: "save_as" | "save";
-  onSubmitSave?: (payload: { addedIndexes: number[]; deletedIndexes: number[]; editedItems: { index: number; patch: any }[]; deletedMaterialIndexes?: number[] }) => void;
+  onSubmitSave?: (payload: { addedIndexes: number[]; deletedIndexes: number[]; editedItems: { index: number; patch: any }[]; deletedMaterialIndexes?: number[]; editedMaterialIndexes?: { index: number; patch: any }[] }) => void;
   preDeletedIndexes?: number[];
 }) {
   const [step, setStep] = useState<1 | 2>(mode === "save" ? 2 : 1);
@@ -551,11 +551,14 @@ export function SaveAsWizardDialog({
     const addedIdx: number[] = [];
     const editedItemsOut: { index: number; patch: any }[] = [];
     const deletedMaterialIdx: number[] = [];
+    // Edits to existing materialLines (qty/description/freeze/rate etc.)
+    // route through their own list, keyed by _materialIdx — same reasoning
+    // as deletedMaterialIndexes: materialLines is a separate array/index-space
+    // from step11_items, and these rows share a synthetic index sentinel
+    // that isn't a real position in tableData.materialLines.
+    const editedMaterialIdx: { index: number; patch: any }[] = [];
 
     computedResults.forEach(({ item, cfg }) => {
-      // Engine/materialLine items live in tableData.materialLines, not
-      // step11_items, so only their deletion can be addressed through the
-      // server's fullEdit branch (rate/qty editing here stays step11-only).
       const isEngineLine = (item as any)._materialIdx !== undefined && (item as any)._s11Idx === undefined;
 
       // If deleted, we don't need to add it to editedItems or addedIdx.
@@ -570,9 +573,7 @@ export function SaveAsWizardDialog({
         return;
       }
 
-      if (isEngineLine) return;
-
-      const isFreshAdd = item.manual === true && !item.manualApproval;
+      const isFreshAdd = !isEngineLine && item.manual === true && !item.manualApproval;
 
       if (isFreshAdd) {
         addedIdx.push(item.index);
@@ -591,25 +592,32 @@ export function SaveAsWizardDialog({
         || cfg.installRate !== origInstall || cfg.freezeAndEdit !== origFreeze || cfg.applyWastage !== origApplyWastage
         || cfg.applyRounding !== origApplyRounding || (cfg.description || "") !== origDescription;
 
-      if (changed) {
-        editedItemsOut.push({
-          index: item.index,
-          patch: {
-            qty: cfg.qty,
-            qtyPerSqf: cfg.qty,
-            baseQty: cfg.qty,
-            wastagePct: cfg.wastagePct,
-            freezeAndEdit: cfg.freezeAndEdit,
-            applyWastage: cfg.applyWastage,
-            applyRounding: cfg.applyRounding,
-            supply_rate: cfg.supplyRate,
-            install_rate: cfg.installRate,
-            supplyRate: cfg.supplyRate,
-            installRate: cfg.installRate,
-            description: cfg.description || origDescription,
-          },
-        });
+      if (!changed) return;
+
+      const patch = {
+        qty: cfg.qty,
+        qtyPerSqf: cfg.qty,
+        baseQty: cfg.qty,
+        wastagePct: cfg.wastagePct,
+        freezeAndEdit: cfg.freezeAndEdit,
+        applyWastage: cfg.applyWastage,
+        applyRounding: cfg.applyRounding,
+        supply_rate: cfg.supplyRate,
+        install_rate: cfg.installRate,
+        supplyRate: cfg.supplyRate,
+        installRate: cfg.installRate,
+        description: cfg.description || origDescription,
+      };
+
+      if (isEngineLine) {
+        // Fresh additions of engine lines aren't a real thing (they'd have
+        // come in via addedIdx/step11 instead), so any changed engine line
+        // here is always an edit to a pre-existing material.
+        editedMaterialIdx.push({ index: (item as any)._materialIdx, patch });
+        return;
       }
+
+      editedItemsOut.push({ index: item.index, patch });
     });
 
     // Filter deletedIndexes to only include step11 items (not engine/materialLine items)
@@ -618,7 +626,13 @@ export function SaveAsWizardDialog({
       return !item || (item as any)._s11Idx !== undefined;
     });
 
-    onSubmitSave({ addedIndexes: addedIdx, deletedIndexes: step11DeletedIndexes, editedItems: editedItemsOut, deletedMaterialIndexes: deletedMaterialIdx } as any);
+    onSubmitSave({
+      addedIndexes: addedIdx,
+      deletedIndexes: step11DeletedIndexes,
+      editedItems: editedItemsOut,
+      deletedMaterialIndexes: deletedMaterialIdx,
+      editedMaterialIndexes: editedMaterialIdx,
+    } as any);
   };
 
   const stepLabels = ["Product Name", "Configuration"];
@@ -1009,11 +1023,13 @@ export function SaveAsWizardDialog({
                         : isFreezed
                           ? "bg-cyan-100 border-cyan-200"
                           : "bg-white";
-                    // "save" mode supports deleting both step11_items (it._s11Idx) and
-                    // engine material-line rows (it._materialIdx) — the latter cover the
-                    // product's pre-existing/original materials. Rate/qty editing through
-                    // this wizard is still step11-only, so engine lines stay read-only for
-                    // everything except the delete toggle.
+                    // "save" mode supports deleting AND editing both step11_items
+                    // (it._s11Idx) and engine material-line rows (it._materialIdx) — the
+                    // latter cover the product's pre-existing/original materials. Edits
+                    // made below (qty/description/rate/wastage/freeze) are diffed against
+                    // the original values in handleSubmitSaveEdit and, for engine lines,
+                    // go out via editedMaterialIndexes so they go through the same
+                    // admin-approval flow as everything else here.
                     const isEngineLine = mode === "save" && (it as any)._s11Idx === undefined && (it as any)._materialIdx !== undefined;
                     const isEngineLineInSaveMode = mode === "save" && (it as any)._s11Idx === undefined && (it as any)._materialIdx === undefined;
                     return (
