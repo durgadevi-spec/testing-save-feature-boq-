@@ -8825,7 +8825,7 @@ export async function registerRoutes(
     authMiddleware,
     async (req: Request, res: Response) => {
       try {
-        const { type, boqItemId, itemIndexes, newProductName, items, calculatedResults, productConfig, fullEdit, addedIndexes, deletedIndexes, editedItems } = req.body;
+        const { type, boqItemId, itemIndexes, newProductName, items, calculatedResults, productConfig, fullEdit, addedIndexes, deletedIndexes, editedItems, deletedMaterialIndexes } = req.body;
 
         if (type !== "save" && type !== "save_as") {
           res.status(400).json({ message: "type must be 'save' or 'save_as'" });
@@ -8840,9 +8840,14 @@ export async function registerRoutes(
           const addedIdx: number[] = Array.isArray(addedIndexes) ? addedIndexes.map(Number) : [];
           const deletedIdx: number[] = Array.isArray(deletedIndexes) ? deletedIndexes.map(Number) : [];
           const editedList: { index: number; patch: any }[] = Array.isArray(editedItems) ? editedItems : [];
+          // Deletions of the product's original/pre-existing materials —
+          // these live in tableData.materialLines, a completely separate
+          // array/index-space from step11_items, so they're tracked with
+          // their own list end-to-end rather than folded into allTouched.
+          const deletedMaterialIdx: number[] = Array.isArray(deletedMaterialIndexes) ? deletedMaterialIndexes.map(Number) : [];
           const allTouched = [...addedIdx, ...deletedIdx, ...editedList.map((e) => Number(e.index))];
 
-          if (!boqItemId || allTouched.length === 0) {
+          if (!boqItemId || (allTouched.length === 0 && deletedMaterialIdx.length === 0)) {
             res.status(400).json({ message: "boqItemId and at least one added, edited, or deleted item are required" });
             return;
           }
@@ -8855,6 +8860,7 @@ export async function registerRoutes(
           const boqRow = boqRes.rows[0];
           const tableData = typeof boqRow.table_data === "string" ? JSON.parse(boqRow.table_data) : (boqRow.table_data || {});
           const step11Items: any[] = Array.isArray(tableData.step11_items) ? tableData.step11_items : [];
+          const materialLines: any[] = Array.isArray(tableData.materialLines) ? tableData.materialLines : [];
 
           for (const idx of allTouched) {
             const item = step11Items[idx];
@@ -8864,6 +8870,17 @@ export async function registerRoutes(
             }
             if (item.manualApproval && item.manualApproval.status === "pending") {
               res.status(400).json({ message: "One or more items already have a pending change awaiting approval." });
+              return;
+            }
+          }
+          for (const idx of deletedMaterialIdx) {
+            const line = materialLines[idx];
+            if (!line) {
+              res.status(400).json({ message: `Material line ${idx} not found` });
+              return;
+            }
+            if (line.manualApproval && line.manualApproval.status === "pending") {
+              res.status(400).json({ message: "One or more materials already have a pending change awaiting approval." });
               return;
             }
           }
@@ -8877,7 +8894,12 @@ export async function registerRoutes(
             const idx = Number(e.index);
             return { ...step11Items[idx], ...(e.patch || {}), _action: "edit", _index: idx, _before: step11Items[idx] };
           });
-          const combinedSnapshot = [...addedSnapshot, ...editedSnapshot, ...deletedSnapshot];
+          // Tagged with _materialIndex (not _index) so approve/reject never
+          // confuses a materialLines position with a step11_items position.
+          const deletedMaterialSnapshot = deletedMaterialIdx.map((idx) => ({
+            ...materialLines[idx], _action: "delete", _source: "materialLine", _materialIndex: idx,
+          }));
+          const combinedSnapshot = [...addedSnapshot, ...editedSnapshot, ...deletedSnapshot, ...deletedMaterialSnapshot];
 
           const userObj = (req.user as any) || {};
           const requestedBy = userObj.id || "system";
@@ -8899,7 +8921,7 @@ export async function registerRoutes(
               null,
               JSON.stringify(allTouched),
               JSON.stringify(combinedSnapshot),
-              null,
+              deletedMaterialIdx.length > 0 ? JSON.stringify({ deletedMaterialIndexes: deletedMaterialIdx }) : null,
               requestedBy,
               requestedByName,
             ]
@@ -8911,7 +8933,15 @@ export async function registerRoutes(
             const action = addedIdx.includes(idx) ? "add" : deletedIdx.includes(idx) ? "delete" : "edit";
             return { ...it, manualApproval: { status: "pending", requestId: request.id, type: "save", action, submittedAt: new Date().toISOString() } };
           });
-          const updatedTableData = { ...tableData, step11_items: updatedStep11 };
+          const updatedMaterialLines = materialLines.map((line: any, idx: number) => {
+            if (!deletedMaterialIdx.includes(idx)) return line;
+            return { ...line, manualApproval: { status: "pending", requestId: request.id, type: "save", action: "delete", submittedAt: new Date().toISOString() } };
+          });
+          const updatedTableData = {
+            ...tableData,
+            step11_items: updatedStep11,
+            ...(materialLines.length > 0 ? { materialLines: updatedMaterialLines } : {}),
+          };
           await query(`UPDATE boq_items SET table_data = $1, computed_value = $2 WHERE id = $3`, [JSON.stringify(updatedTableData), computeItemValue(updatedTableData), boqItemId]);
 
           if (boqRow.version_id) {
@@ -9143,6 +9173,7 @@ export async function registerRoutes(
         const boqRow = boqRes.rows[0];
         const tableData = typeof boqRow.table_data === "string" ? JSON.parse(boqRow.table_data) : (boqRow.table_data || {});
         const step11Items: any[] = Array.isArray(tableData.step11_items) ? tableData.step11_items : [];
+        const materialLines: any[] = Array.isArray(tableData.materialLines) ? tableData.materialLines : [];
 
         let createdBoqItemId: string | null = null;
 
@@ -9196,7 +9227,26 @@ export async function registerRoutes(
             })
             .filter((it: any) => it !== null);
 
-          const updatedTableData = { ...tableData, step11_items: updatedStep11 };
+          // Deletions of the product's original/pre-existing materials —
+          // these live in tableData.materialLines (a separate array from
+          // step11_items), flagged with their own pending manualApproval by
+          // the create endpoint. Approving removes them from this card's
+          // materialLines and — same as step11 deletions below — from the
+          // global product library.
+          const updatedMaterialLines = materialLines
+            .map((line: any) => {
+              if (!line?.manualApproval || line.manualApproval.requestId !== id || line.manualApproval.status !== "pending") return line;
+              if (line.manualApproval.action !== "delete") return line;
+              deletedItemsToSync.push(line);
+              return null; // filtered out below — material removed from this product
+            })
+            .filter((line: any) => line !== null);
+
+          const updatedTableData = {
+            ...tableData,
+            step11_items: updatedStep11,
+            ...(materialLines.length > 0 ? { materialLines: updatedMaterialLines } : {}),
+          };
           await query(`UPDATE boq_items SET table_data = $1, computed_value = $2 WHERE id = $3`, [JSON.stringify(updatedTableData), computeItemValue(updatedTableData), request.boq_item_id]);
 
           // Sync additions, edits, and deletions into the global product
@@ -9213,12 +9263,12 @@ export async function registerRoutes(
               for (const item of newItemsToInsert) {
                 const matId = item.id || item.material_id || item.materialId || "00000000-0000-0000-0000-000000000000";
                 const matName = item.name || item.title || item.material_name || "";
-                
+
                 const existingRes = await query(
                   `SELECT id FROM step11_product_items WHERE step11_product_id = $1 AND (material_id::text = $2::text OR material_name = $3)`,
                   [step11ProductId, matId, matName]
                 );
-                
+
                 if (existingRes.rowCount && existingRes.rowCount > 0) {
                   // Legacy item that frontend treated as "add" because it had no manualApproval.
                   // It already exists in the global library, so just update it.
@@ -9595,6 +9645,7 @@ export async function registerRoutes(
           const boqRow = boqRes.rows[0];
           const tableData = typeof boqRow.table_data === "string" ? JSON.parse(boqRow.table_data) : (boqRow.table_data || {});
           const step11Items: any[] = Array.isArray(tableData.step11_items) ? tableData.step11_items : [];
+          const materialLines: any[] = Array.isArray(tableData.materialLines) ? tableData.materialLines : [];
 
           let updatedStep11: any[];
           if (request.type === "save") {
@@ -9621,7 +9672,19 @@ export async function registerRoutes(
               return rest;
             });
           }
-          const updatedTableData = { ...tableData, step11_items: updatedStep11 };
+          // Un-flag any materialLine deletions this request proposed — they
+          // were never removed anywhere, so rejecting just clears the
+          // pending marker and the material reappears as before.
+          const updatedMaterialLines = materialLines.map((line: any) => {
+            if (!line?.manualApproval || line.manualApproval.requestId !== id) return line;
+            const { manualApproval, ...rest } = line;
+            return rest;
+          });
+          const updatedTableData = {
+            ...tableData,
+            step11_items: updatedStep11,
+            ...(materialLines.length > 0 ? { materialLines: updatedMaterialLines } : {}),
+          };
           await query(`UPDATE boq_items SET table_data = $1, computed_value = $2 WHERE id = $3`, [JSON.stringify(updatedTableData), computeItemValue(updatedTableData), request.boq_item_id]);
           try {
             await recalculateProjectValue(boqRow.project_id, boqRow.version_id || undefined);

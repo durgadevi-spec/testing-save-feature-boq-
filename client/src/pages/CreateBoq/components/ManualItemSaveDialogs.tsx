@@ -171,7 +171,7 @@ export function SaveAsWizardDialog({
    * can be removed (not just new ones added), all submitted together for
    * approval. */
   mode?: "save_as" | "save";
-  onSubmitSave?: (payload: { addedIndexes: number[]; deletedIndexes: number[]; editedItems: { index: number; patch: any }[] }) => void;
+  onSubmitSave?: (payload: { addedIndexes: number[]; deletedIndexes: number[]; editedItems: { index: number; patch: any }[]; deletedMaterialIndexes?: number[] }) => void;
   preDeletedIndexes?: number[];
 }) {
   const [step, setStep] = useState<1 | 2>(mode === "save" ? 2 : 1);
@@ -550,24 +550,29 @@ export function SaveAsWizardDialog({
     if (!onSubmitSave) return;
     const addedIdx: number[] = [];
     const editedItemsOut: { index: number; patch: any }[] = [];
+    const deletedMaterialIdx: number[] = [];
 
     computedResults.forEach(({ item, cfg }) => {
-      // Skip engine/materialLine items — they live in tableData.materialLines,
-      // not step11_items, so the server's fullEdit branch can't address them.
+      // Engine/materialLine items live in tableData.materialLines, not
+      // step11_items, so only their deletion can be addressed through the
+      // server's fullEdit branch (rate/qty editing here stays step11-only).
       const isEngineLine = (item as any)._materialIdx !== undefined && (item as any)._s11Idx === undefined;
-      if (isEngineLine) return;
-
-      const isFreshAdd = item.manual === true && !item.manualApproval;
 
       // If deleted, we don't need to add it to editedItems or addedIdx.
-      // deletedIndexes is passed separately.
+      // deletedIndexes is passed separately (materialLine deletions go out
+      // through their own deletedMaterialIndexes list, keyed by _materialIdx
+      // since these items share a synthetic negative `index` sentinel that
+      // isn't a real position in tableData.materialLines).
       if (deletedIndexes.has(item.index)) {
-        if (isFreshAdd) {
-          // If it's a fresh add AND deleted before approval, we should still
-          // tell the backend it's deleted (so it gets removed from step11_items).
+        if (isEngineLine) {
+          deletedMaterialIdx.push((item as any)._materialIdx);
         }
         return;
       }
+
+      if (isEngineLine) return;
+
+      const isFreshAdd = item.manual === true && !item.manualApproval;
 
       if (isFreshAdd) {
         addedIdx.push(item.index);
@@ -613,7 +618,7 @@ export function SaveAsWizardDialog({
       return !item || (item as any)._s11Idx !== undefined;
     });
 
-    onSubmitSave({ addedIndexes: addedIdx, deletedIndexes: step11DeletedIndexes, editedItems: editedItemsOut });
+    onSubmitSave({ addedIndexes: addedIdx, deletedIndexes: step11DeletedIndexes, editedItems: editedItemsOut, deletedMaterialIndexes: deletedMaterialIdx } as any);
   };
 
   const stepLabels = ["Product Name", "Configuration"];
@@ -1004,13 +1009,13 @@ export function SaveAsWizardDialog({
                         : isFreezed
                           ? "bg-cyan-100 border-cyan-200"
                           : "bg-white";
-                    // "save" mode's deletedIndexes/onSubmitSave payload only understands
-                    // step11_items positions (it._s11Idx). Engine material-line rows
-                    // (no _s11Idx) are shown here for context/rate-editing only — they
-                    // can't be deleted through this approval flow, so don't offer the
-                    // toggle for them (it would silently do nothing on submit while
-                    // looking like it worked).
-                    const isEngineLineInSaveMode = mode === "save" && (it as any)._s11Idx === undefined;
+                    // "save" mode supports deleting both step11_items (it._s11Idx) and
+                    // engine material-line rows (it._materialIdx) — the latter cover the
+                    // product's pre-existing/original materials. Rate/qty editing through
+                    // this wizard is still step11-only, so engine lines stay read-only for
+                    // everything except the delete toggle.
+                    const isEngineLine = mode === "save" && (it as any)._s11Idx === undefined && (it as any)._materialIdx !== undefined;
+                    const isEngineLineInSaveMode = mode === "save" && (it as any)._s11Idx === undefined && (it as any)._materialIdx === undefined;
                     return (
                       <TableRow key={`${it._s11Idx !== undefined ? "s11" : "ml"}-${it.index}-${idx}`} className={`hover:bg-muted/5 transition-colors border-b ${rowClass}`}>
                         <TableCell className="text-center cursor-grab active:cursor-grabbing">
@@ -1022,10 +1027,10 @@ export function SaveAsWizardDialog({
                             variant="ghost"
                             size="sm"
                             disabled={isEngineLineInSaveMode}
-                            title={isEngineLineInSaveMode ? "Engine materials aren't editable here" : isMarkedDeleted ? "Undo delete" : (mode === "save" && it.index >= 0) ? "Delete this material" : "Remove"}
+                            title={isEngineLineInSaveMode ? "Engine materials aren't editable here" : isMarkedDeleted ? "Undo delete" : (mode === "save" && (it.index >= 0 || isEngineLine)) ? "Delete this material" : "Remove"}
                             onClick={() => {
                               if (isEngineLineInSaveMode) return;
-                              if (mode === "save" && it.index >= 0) {
+                              if (mode === "save" && (it.index >= 0 || isEngineLine)) {
                                 setDeletedIndexes((prev) => {
                                   const next = new Set(prev);
                                   if (next.has(it.index)) next.delete(it.index); else next.add(it.index);

@@ -97,6 +97,14 @@ export const BoqItemCard = React.memo(function BoqItemCard({ boqItem, boqIdx, is
   // on the server WITHOUT removing it from step11_items — so no other
   // item's _s11Idx ever shifts while a deletion is pending. ─────────────
   const [deletedFromBom, setDeletedFromBom] = useState<any[]>([]);
+  // Engine-based material line items (tableData.materialLines) marked for
+  // removal via the Trash icon, but NOT yet deleted on the server — mirrors
+  // deletedFromBom above but for the product's pre-existing/original
+  // materials (identified by _materialIdx instead of _s11Idx). These also
+  // route through the Save wizard's approval flow now, instead of being
+  // deleted instantly, so a deletion of an existing material requires the
+  // same admin approval as any other change.
+  const [deletedMaterialLines, setDeletedMaterialLines] = useState<any[]>([]);
 
   const handleCardDeleteRow = (id: string, td: any, idx: number, item?: any) => {
     const isStep11Item = !!item && item._s11Idx !== undefined;
@@ -109,10 +117,17 @@ export const BoqItemCard = React.memo(function BoqItemCard({ boqItem, boqIdx, is
       });
       return;
     }
-    // Engine-based material line items (tableData.materialLines) aren't
-    // covered by the pending-approval endpoint yet — it only understands
-    // step11_items indexes — so keep the previous instant-delete behavior
-    // for them.
+    const isEngineLine = !!item && item._materialIdx !== undefined;
+    if (isEngineLine) {
+      // Defer: same pending-approval pattern as step11 items above, keyed
+      // by _materialIdx (position in tableData.materialLines) instead.
+      setDeletedMaterialLines(prev => {
+        if (prev.some(i => i._materialIdx === item._materialIdx)) return prev;
+        return [...prev, item];
+      });
+      return;
+    }
+    // Anything else falls back to the previous instant-delete behavior.
     handleDeleteRow(id, td, idx, item);
   };
   const [localRemarks, setLocalRemarks] = useState(tableData.remarks || "");
@@ -174,10 +189,10 @@ export const BoqItemCard = React.memo(function BoqItemCard({ boqItem, boqIdx, is
   // above (additive-only), this lets the user also edit or remove existing
   // materials — nothing changes on the live product until an admin
   // approves the request. ──────────────────────────────────────────────
-  const handleSubmitSaveEdit = async (payload: { addedIndexes: number[]; deletedIndexes: number[]; editedItems: { index: number; patch: any }[] }) => {
+  const handleSubmitSaveEdit = async (payload: { addedIndexes: number[]; deletedIndexes: number[]; editedItems: { index: number; patch: any }[]; deletedMaterialIndexes?: number[] }) => {
     if (isSubmittingSave) return;
-    const { addedIndexes, deletedIndexes, editedItems } = payload;
-    const totalChanges = addedIndexes.length + deletedIndexes.length + editedItems.length;
+    const { addedIndexes, deletedIndexes, editedItems, deletedMaterialIndexes = [] } = payload;
+    const totalChanges = addedIndexes.length + deletedIndexes.length + editedItems.length + deletedMaterialIndexes.length;
     if (totalChanges === 0) {
       toast({ title: "No changes", description: "Nothing was added, edited, or deleted." });
       return;
@@ -193,6 +208,7 @@ export const BoqItemCard = React.memo(function BoqItemCard({ boqItem, boqIdx, is
           addedIndexes,
           deletedIndexes,
           editedItems,
+          deletedMaterialIndexes,
         }),
       });
       if (!res.ok) throw new Error(await res.text());
@@ -201,11 +217,12 @@ export const BoqItemCard = React.memo(function BoqItemCard({ boqItem, boqIdx, is
         setBoqItems((prev) => prev.map((i) => (i.id === boqItem.id ? { ...i, table_data: data.table_data } : i)));
       }
       // The server now carries manualApproval pending-delete flags on the
-      // touched step11_items, so renderLines' filter will keep hiding them
-      // from that going forward. Clear the local tracking so it doesn't
-      // keep hiding anything the wizard's own "undo delete" toggle un-marked
-      // before submit.
+      // touched step11_items and materialLines, so renderLines' filter will
+      // keep hiding them from that going forward. Clear the local tracking
+      // so it doesn't keep hiding anything the wizard's own "undo delete"
+      // toggle un-marked before submit.
       setDeletedFromBom([]);
+      setDeletedMaterialLines([]);
       toast({ title: "Submitted for Approval", description: `${totalChanges} change(s) submitted for ${productName}.` });
       setShowSaveEditWizard(false);
     } catch (err) {
@@ -268,6 +285,8 @@ export const BoqItemCard = React.memo(function BoqItemCard({ boqItem, boqIdx, is
   const awaitingApprovalItems = step11Items
     .map((it: any, index: number) => ({ ...it, index }))
     .filter((it: any) => it.manual === true && it.manualApproval?.status === "pending");
+  const materialLinesArr: any[] = Array.isArray(tableData.materialLines) ? tableData.materialLines : [];
+  const awaitingApprovalMaterialLines = materialLinesArr.filter((l: any) => l?.manualApproval?.status === "pending");
   const existingProductNamesInVersion = Array.isArray(allProductNames) && allProductNames.length > 0
     ? allProductNames
     : [productName];
@@ -333,7 +352,11 @@ export const BoqItemCard = React.memo(function BoqItemCard({ boqItem, boqIdx, is
         original_rate: getEditedValue(itemKey, "original_rate", line.original_rate),
         rate_amendment_status: getEditedValue(itemKey, "rate_amendment_status", line.rate_amendment_status),
         id: line.id || line.materialId,
-        materialId: line.materialId || line.id
+        materialId: line.materialId || line.id,
+        // Carry through the pending-approval flag (if any) set on the raw
+        // materialLine by the server, so the removal filter below can hide
+        // it the same way pending-delete step11_items are hidden.
+        manualApproval: line.manualApproval
       };
     });
     const manualStep11 = step11Items.map((it: any, s11Idx: number) => {
@@ -455,10 +478,30 @@ export const BoqItemCard = React.memo(function BoqItemCard({ boqItem, boqIdx, is
     () => new Set(deletedFromBom.map((i: any) => i._s11Idx)),
     [deletedFromBom]
   );
+  const deletedMaterialLineIndexes = useMemo(
+    () => new Set(deletedMaterialLines.map((i: any) => i._materialIdx)),
+    [deletedMaterialLines]
+  );
   const isMarkedForRemoval = (it: any) =>
     (it._s11Idx !== undefined && deletedS11Indexes.has(it._s11Idx)) ||
+    (it._materialIdx !== undefined && deletedMaterialLineIndexes.has(it._materialIdx)) ||
     (it.manualApproval?.status === "pending" && it.manualApproval?.action === "delete");
   const renderLines = rawRenderLines.filter((it: any) => !isMarkedForRemoval(it));
+
+  // ── Items shown inside the Save wizard: visible rows + anything marked
+  // for removal locally (so the wizard can show it struck-through with the
+  // toggle pre-checked). Step11 items keep their real _s11Idx as `index`;
+  // everything else (engine/materialLine rows) gets a unique negative
+  // sentinel index to avoid colliding with real step11 positions — the
+  // wizard still reads the real position off `_materialIdx` when building
+  // the submit payload. ─────────────────────────────────────────────────
+  const wizardItems = [...renderLines, ...deletedFromBom, ...deletedMaterialLines].map((it: any, index: number) => ({
+    ...it,
+    index: it._s11Idx !== undefined ? it._s11Idx : -1_000_000 - index,
+  })) as PendingManualItem[];
+  const wizardPreDeletedIndexes = wizardItems
+    .filter((it: any) => deletedFromBom.some((i: any) => i._s11Idx === it._s11Idx) || deletedMaterialLines.some((i: any) => i._materialIdx === it._materialIdx))
+    .map((it: any) => it.index);
 
   const handleRowReorder = async (newOrder: any[]) => {
     setLocalItems(newOrder);
@@ -812,10 +855,10 @@ export const BoqItemCard = React.memo(function BoqItemCard({ boqItem, boqIdx, is
               </div>
             </div>
 
-            {awaitingApprovalItems.length > 0 && (
+            {(awaitingApprovalItems.length + awaitingApprovalMaterialLines.length) > 0 && (
               <div className="text-[11px] font-bold text-amber-700 bg-amber-50 border border-amber-200 rounded px-2.5 py-1.5 inline-flex items-center gap-1.5 w-fit">
                 <Clock className="h-3 w-3" />
-                {awaitingApprovalItems.length} item{awaitingApprovalItems.length === 1 ? "" : "s"} awaiting admin approval
+                {awaitingApprovalItems.length + awaitingApprovalMaterialLines.length} item{(awaitingApprovalItems.length + awaitingApprovalMaterialLines.length) === 1 ? "" : "s"} awaiting admin approval
               </div>
             )}
 
@@ -1056,8 +1099,8 @@ export const BoqItemCard = React.memo(function BoqItemCard({ boqItem, boqIdx, is
         open={showSaveEditWizard}
         onOpenChange={setShowSaveEditWizard}
         sourceProductName={productName}
-        items={[...renderLines, ...deletedFromBom].map((it: any, index: number) => ({ ...it, index: it._s11Idx !== undefined ? it._s11Idx : -1_000_000 - index })) as PendingManualItem[]}
-        preDeletedIndexes={deletedFromBom.map((i: any) => i._s11Idx)}
+        items={wizardItems}
+        preDeletedIndexes={wizardPreDeletedIndexes}
         isSubmitting={isSubmittingSave}
         existingProductNames={existingProductNamesInVersion}
         onSubmit={() => { }}
@@ -1068,8 +1111,8 @@ export const BoqItemCard = React.memo(function BoqItemCard({ boqItem, boqIdx, is
         open={showSaveAsWizard}
         onOpenChange={setShowSaveAsWizard}
         sourceProductName={productName}
-        items={[...renderLines, ...deletedFromBom].map((it: any, index: number) => ({ ...it, index: it._s11Idx !== undefined ? it._s11Idx : -1_000_000 - index })) as PendingManualItem[]}
-        preDeletedIndexes={deletedFromBom.map((i: any) => i._s11Idx)}
+        items={wizardItems}
+        preDeletedIndexes={wizardPreDeletedIndexes}
         isSubmitting={isSubmittingSave}
         existingProductNames={existingProductNamesInVersion}
         onSubmit={handleSubmitSaveAs}
