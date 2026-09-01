@@ -1424,6 +1424,7 @@ export async function registerRoutes(
       "ALTER TABLE step11_product_items ADD COLUMN IF NOT EXISTS base_qty DECIMAL(15,2)",
       "ALTER TABLE step11_product_items ADD COLUMN IF NOT EXISTS wastage_pct DECIMAL(15,4)",
       "ALTER TABLE step11_product_items ADD COLUMN IF NOT EXISTS is_project_pricing BOOLEAN DEFAULT FALSE",
+      "ALTER TABLE step11_product_items ADD COLUMN IF NOT EXISTS description TEXT",
     ];
     for (const sql of addCols) {
       try { await query(sql); } catch { /* column may already exist */ }
@@ -1507,6 +1508,8 @@ export async function registerRoutes(
     // Explicitly upgrade types if they already exist with old restrictive types
     await query(`ALTER TABLE product_step3_config ALTER COLUMN wastage_pct_default TYPE DECIMAL(15,4)`);
     await query(`ALTER TABLE product_step3_config_items ALTER COLUMN wastage_pct TYPE DECIMAL(15,4)`);
+    await query(`ALTER TABLE product_step3_config_items ADD COLUMN IF NOT EXISTS description TEXT`);
+    await query(`ALTER TABLE product_approval_items ADD COLUMN IF NOT EXISTS description TEXT`);
 
     console.log("[db] product_step3_config BOQ columns ensured and types upgraded");
   } catch (err: unknown) {
@@ -9362,11 +9365,11 @@ export async function registerRoutes(
                        unit = $1, qty = $2, supply_rate = $3, install_rate = $4,
                        rate = $5, amount = $6, freeze_and_edit = $7,
                        apply_wastage = $8, shop_name = $9, base_qty = $10,
-                       wastage_pct = $11, location = $12
-                     WHERE step11_product_id = $13 
+                       wastage_pct = $11, location = $12, description = $13
+                     WHERE step11_product_id = $14 
                      AND (
-                       material_id::text = $14::text 
-                       OR material_name = $15
+                       material_id::text = $15::text 
+                       OR material_name = $16
                      )`,
                     [
                       item.unit || "nos",
@@ -9381,6 +9384,7 @@ export async function registerRoutes(
                       item.baseQty ?? item.qty ?? 0,
                       item.wastagePct !== undefined ? item.wastagePct : null,
                       item.location || "",
+                      item.description ?? null,
                       step11ProductId,
                       matId,
                       matName
@@ -9389,8 +9393,8 @@ export async function registerRoutes(
                 } else {
                   await query(
                     `INSERT INTO step11_product_items 
-                           (step11_product_id, material_id, material_name, unit, qty, supply_rate, install_rate, rate, amount, location, freeze_and_edit, apply_wastage, shop_name, base_qty, wastage_pct)
-                           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
+                           (step11_product_id, material_id, material_name, unit, qty, supply_rate, install_rate, rate, amount, location, freeze_and_edit, apply_wastage, shop_name, base_qty, wastage_pct, description)
+                           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)`,
                     [
                       step11ProductId,
                       matId,
@@ -9406,7 +9410,8 @@ export async function registerRoutes(
                       item.applyWastage !== undefined ? item.applyWastage : true,
                       item.shopName || item.shop_name || null,
                       item.baseQty ?? item.qty ?? 0,
-                      item.wastagePct !== undefined ? item.wastagePct : null
+                      item.wastagePct !== undefined ? item.wastagePct : null,
+                      item.description ?? null
                     ]
                   );
                 }
@@ -9423,10 +9428,11 @@ export async function registerRoutes(
                 await query(
                   `UPDATE step11_product_items SET
                      qty = $1, supply_rate = $2, install_rate = $3, rate = $4, amount = $5,
-                     freeze_and_edit = $6, apply_wastage = $7, base_qty = $8, wastage_pct = $9
-                   WHERE step11_product_id = $10 AND (
-                     ($11::uuid IS NOT NULL AND material_id = $11::uuid) OR
-                     ($11::uuid IS NULL AND material_name = $12)
+                     freeze_and_edit = $6, apply_wastage = $7, base_qty = $8, wastage_pct = $9,
+                     description = $10
+                   WHERE step11_product_id = $11 AND (
+                     ($12::uuid IS NOT NULL AND material_id = $12::uuid) OR
+                     ($12::uuid IS NULL AND material_name = $13)
                    )`,
                   [
                     item.qty || 0,
@@ -9438,6 +9444,7 @@ export async function registerRoutes(
                     item.applyWastage !== undefined ? item.applyWastage : true,
                     item.baseQty ?? item.qty ?? 0,
                     item.wastagePct !== undefined ? item.wastagePct : null,
+                    item.description ?? null,
                     step11ProductId,
                     materialId || null,
                     item.name || item.title || item.material_name,
@@ -9495,9 +9502,9 @@ export async function registerRoutes(
                     `UPDATE product_step3_config_items SET
                        unit = $1, qty = $2, supply_rate = $3, install_rate = $4, rate = $5,
                        amount = $6, freeze_and_edit = $7, apply_wastage = $8, shop_name = $9,
-                       base_qty = $10, wastage_pct = $11, location = $12
-                     WHERE step3_config_id = $13 AND (
-                       ($14::text IS NOT NULL AND material_id::text = $14::text) OR material_name = $15
+                       base_qty = $10, wastage_pct = $11, location = $12, description = $13
+                     WHERE step3_config_id = $14 AND (
+                       ($15::text IS NOT NULL AND material_id::text = $15::text) OR material_name = $16
                      )`,
                     [
                       item.unit || "nos", item.qty || 0, supplyRate, installRate,
@@ -9508,14 +9515,15 @@ export async function registerRoutes(
                       item.baseQty ?? item.qty ?? 0,
                       item.wastagePct !== undefined ? item.wastagePct : null,
                       item.location || "",
+                      item.description ?? null,
                       step3ConfigId, matId, matName,
                     ]
                   );
                 } else {
                   await query(
                     `INSERT INTO product_step3_config_items
-                       (step3_config_id, material_id, material_name, unit, qty, supply_rate, install_rate, rate, amount, location, freeze_and_edit, apply_wastage, shop_name, base_qty, wastage_pct)
-                       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
+                       (step3_config_id, material_id, material_name, unit, qty, supply_rate, install_rate, rate, amount, location, freeze_and_edit, apply_wastage, shop_name, base_qty, wastage_pct, description)
+                       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
                     [
                       step3ConfigId, matId, matName, item.unit || "nos", item.qty || 0,
                       supplyRate, installRate, supplyRate + installRate,
@@ -9525,6 +9533,7 @@ export async function registerRoutes(
                       item.shopName || item.shop_name || null,
                       item.baseQty ?? item.qty ?? 0,
                       item.wastagePct !== undefined ? item.wastagePct : null,
+                      item.description ?? null,
                     ]
                   );
                 }
@@ -9537,9 +9546,10 @@ export async function registerRoutes(
                 await query(
                   `UPDATE product_step3_config_items SET
                      qty = $1, supply_rate = $2, install_rate = $3, rate = $4, amount = $5,
-                     freeze_and_edit = $6, apply_wastage = $7, base_qty = $8, wastage_pct = $9
-                   WHERE step3_config_id = $10 AND (
-                     ($11::text IS NOT NULL AND material_id::text = $11::text) OR material_name = $12
+                     freeze_and_edit = $6, apply_wastage = $7, base_qty = $8, wastage_pct = $9,
+                     description = $10
+                   WHERE step3_config_id = $11 AND (
+                     ($12::text IS NOT NULL AND material_id::text = $12::text) OR material_name = $13
                    )`,
                   [
                     item.qty || 0, supplyRate, installRate, supplyRate + installRate,
@@ -9548,6 +9558,7 @@ export async function registerRoutes(
                     item.applyWastage !== undefined ? item.applyWastage : true,
                     item.baseQty ?? item.qty ?? 0,
                     item.wastagePct !== undefined ? item.wastagePct : null,
+                    item.description ?? null,
                     step3ConfigId, materialId, item.name || item.title || item.material_name,
                   ]
                 );
@@ -9596,9 +9607,9 @@ export async function registerRoutes(
                     `UPDATE product_approval_items SET
                        unit = $1, qty = $2, supply_rate = $3, install_rate = $4, rate = $5,
                        amount = $6, freeze_and_edit = $7, apply_wastage = $8, shop_name = $9,
-                       base_qty = $10, wastage_pct = $11, location = $12
-                     WHERE approval_id = $13 AND (
-                       ($14::text IS NOT NULL AND material_id::text = $14::text) OR material_name = $15
+                       base_qty = $10, wastage_pct = $11, location = $12, description = $13
+                     WHERE approval_id = $14 AND (
+                       ($15::text IS NOT NULL AND material_id::text = $15::text) OR material_name = $16
                      )`,
                     [
                       item.unit || "nos", item.qty || 0, supplyRate, installRate,
@@ -9609,14 +9620,15 @@ export async function registerRoutes(
                       item.baseQty ?? item.qty ?? 0,
                       item.wastagePct !== undefined ? item.wastagePct : null,
                       item.location || "",
+                      item.description ?? null,
                       approvalRowId, matId, matName,
                     ]
                   );
                 } else {
                   await query(
                     `INSERT INTO product_approval_items
-                       (approval_id, material_id, material_name, unit, qty, supply_rate, install_rate, rate, amount, location, freeze_and_edit, apply_wastage, shop_name, base_qty, wastage_pct)
-                       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
+                       (approval_id, material_id, material_name, unit, qty, supply_rate, install_rate, rate, amount, location, freeze_and_edit, apply_wastage, shop_name, base_qty, wastage_pct, description)
+                       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
                     [
                       approvalRowId, matId, matName, item.unit || "nos", item.qty || 0,
                       supplyRate, installRate, supplyRate + installRate,
@@ -9626,6 +9638,7 @@ export async function registerRoutes(
                       item.shopName || item.shop_name || null,
                       item.baseQty ?? item.qty ?? 0,
                       item.wastagePct !== undefined ? item.wastagePct : null,
+                      item.description ?? null,
                     ]
                   );
                 }
@@ -9638,9 +9651,10 @@ export async function registerRoutes(
                 await query(
                   `UPDATE product_approval_items SET
                      qty = $1, supply_rate = $2, install_rate = $3, rate = $4, amount = $5,
-                     freeze_and_edit = $6, apply_wastage = $7, base_qty = $8, wastage_pct = $9
-                   WHERE approval_id = $10 AND (
-                     ($11::text IS NOT NULL AND material_id::text = $11::text) OR material_name = $12
+                     freeze_and_edit = $6, apply_wastage = $7, base_qty = $8, wastage_pct = $9,
+                     description = $10
+                   WHERE approval_id = $11 AND (
+                     ($12::text IS NOT NULL AND material_id::text = $12::text) OR material_name = $13
                    )`,
                   [
                     item.qty || 0, supplyRate, installRate, supplyRate + installRate,
@@ -9649,6 +9663,7 @@ export async function registerRoutes(
                     item.applyWastage !== undefined ? item.applyWastage : true,
                     item.baseQty ?? item.qty ?? 0,
                     item.wastagePct !== undefined ? item.wastagePct : null,
+                    item.description ?? null,
                     approvalRowId, materialId, item.name || item.title || item.material_name,
                   ]
                 );
@@ -9733,7 +9748,7 @@ export async function registerRoutes(
             configBasis,
             materialLines,
             targetRequiredQty: 1, // Target defaults to 1 when a new product is spawned via Save As
-            finalize_description: newItems[0]?.description || request.new_product_name,
+            finalize_description: productConfig.description || newItems[0]?.description || request.new_product_name,
             save_as_source_boq_item_id: request.boq_item_id,
             save_as_request_id: id,
           };

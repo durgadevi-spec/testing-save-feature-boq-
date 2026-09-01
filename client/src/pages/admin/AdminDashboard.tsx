@@ -4687,7 +4687,9 @@ export default function AdminDashboard() {
                                 onCheckedChange={() =>
                                   toggleSelectAllMaterialRequests(
                                     materialRequests
-                                      .filter((r: any) => r.status === "pending")
+                           
+                           
+                                    .filter((r: any) => r.status === "pending")
                                       .map((r: any) => r.id)
                                   )
                                 }
